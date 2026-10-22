@@ -16,7 +16,7 @@ permissions:
     pull-requests: write
 
 concurrency:
-    group: enforce-rebase-${{ github.repository }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+    group: enforce-rebase-${{ github.repository }}-${{ github.workflow }}-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.ref }}
     cancel-in-progress: true
 
 jobs:
