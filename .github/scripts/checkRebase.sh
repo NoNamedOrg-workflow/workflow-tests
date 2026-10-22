@@ -2,6 +2,8 @@
 # Pure decision: exit 0 rebased, 1 policy failure, 2 unexpected input. Side effects live elsewhere so the
 # same rule runs on a laptop and in CI.
 set -euo pipefail
+# canary: simulates an unexpected failure of the decision code
+exit 3
 
 if [ "$#" -lt 2 ]; then
     echo "usage: checkRebase.sh <baseSha> <headSha> [baseName]" >&2
