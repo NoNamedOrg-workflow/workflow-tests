@@ -2,7 +2,8 @@
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-dist="$root/dist/enforceRebase.yml"
+# DIST_FILE lets a mutation run prove the cases can go red; the default is the committed workflow.
+dist=${DIST_FILE:-$root/dist/enforceRebase.yml}
 bashBin=${BASH_BIN:-bash}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -11,6 +12,10 @@ failed=0
 
 # The step under test is the real one, cut out of the generated YAML (no yq or ruby on the runner image we mimic).
 # The run: text is the block at ten spaces that follows the step's "run: |" line; the strip undoes that indentation.
+# The embedded scripts start with #!/usr/bin/env bash, so the bash under test must come first in PATH to run them.
+mkdir -p "$work/bin"
+ln -s "$(command -v "$bashBin")" "$work/bin/bash"
+
 stepBody() {
     awk -v name="$1" '
         $0 ~ "- name: " name "$" { on = 1; next }
@@ -47,9 +52,27 @@ newRepo() {
 runStep() {
     : > "$scene/out"
     headSha=$(git -C "$scene/pr" rev-parse HEAD)
-    output=$(cd "$scene/pr" && env BASE="$1" HEAD_SHA="$headSha" RUNNER_TEMP="$scene/tmp" GITHUB_OUTPUT="$scene/out" \
+    output=$(cd "$scene/pr" && env PATH="$work/bin:$PATH" BASE="$1" HEAD_SHA="$headSha" RUNNER_TEMP="$scene/tmp" GITHUB_OUTPUT="$scene/out" \
         "$bashBin" -e "$work/check.sh" 2>&1 < /dev/null)
     status=$?
+}
+
+# assert NAME COMMAND...: the command succeeding means the case passed.
+assert() {
+    local name=$1
+    shift
+    if "$@"; then
+        passed=$((passed + 1))
+        echo "PASS $name"
+        return 0
+    fi
+    failed=$((failed + 1))
+    echo "FAIL $name"
+    echo "$output" | sed 's/^/    /'
+}
+
+isUnexpectedFailure() {
+    [ "$status" -ne 0 ] && [ "$status" -ne 1 ] && ! grep -q '^ok=' "$scene/out"
 }
 
 verdict() {
@@ -117,8 +140,8 @@ newRepo missingBase
 git -C "$scene/pr" checkout -q -b feature
 commitFile "$scene/pr" work
 runStep gone
-verdict "T-RF19-b/behavior-unexpected an origin without the base branch fails and never writes ok=true" 128 "" ""
-[ ! -s "$scene/out" ] && passed=$((passed + 1)) && echo "PASS T-RF19-b/behavior-unexpected-2 nothing is written to the output"
+assert "T-RF19-b/behavior-unexpected an origin without the base branch fails unexpectedly (not exit 0 or 1) and writes no ok= line" isUnexpectedFailure
+assert "T-RF19-b/behavior-unexpected-2 nothing is written to the output" test ! -s "$scene/out"
 
 # The tag sits on an older commit than the branch of the same name: resolving the short name would call the branch behind.
 newRepo tag
@@ -139,7 +162,7 @@ git -C "$scene/pr" checkout -q -b feature "origin/$hostile"
 commitFile "$scene/pr" work
 runStep "$hostile"
 verdict "T-RF19-b/behavior-injection a base branch with shell syntax passes as plain text" 0 "ok=true" "branch is rebased"
-[ ! -e "$work/pwned" ] && passed=$((passed + 1)) && echo "PASS T-RF19-b/behavior-injection-2 nothing was executed"
+assert "T-RF19-b/behavior-injection-2 nothing was executed" test ! -e "$work/pwned"
 
 echo "inlineWorkflowBehavior: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
