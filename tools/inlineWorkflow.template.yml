@@ -1,0 +1,81 @@
+# Generated from tools/inlineWorkflow.template.yml by tools/buildInlineWorkflow.sh: edit the template or the scripts
+# under .github/scripts, never this file. The scripts are embedded because an internal repository cannot download the
+# scripts of another repository with the default token. A required workflow is read from the base branch, so the
+# pull request cannot change the decision code embedded here.
+name: Enforce Rebase
+
+run-name: "CI: Enforce rebase before merge"
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  # workflow_ref names the pinned version: a canary and the active version on the same PR must not cancel each other.
+  group: enforce-rebase-${{ github.repository }}-${{ github.workflow }}-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rebase-status:
+    runs-on: ubuntu-latest
+    # Pull request data reaches the shell only through env, so a branch name can never be parsed as shell syntax.
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUMBER: ${{ github.event.pull_request.number }}
+      BASE: ${{ github.event.pull_request.base.ref }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout the pull request head
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check rebase
+        id: check
+        run: |
+          set -uo pipefail
+          cat > "$RUNNER_TEMP/checkRebase.sh" <<'CHECK_REBASE_SCRIPT_EOF'
+__CHECK_REBASE_SCRIPT__
+          CHECK_REBASE_SCRIPT_EOF
+          cat > "$RUNNER_TEMP/reportRebase.sh" <<'REPORT_REBASE_SCRIPT_EOF'
+__REPORT_REBASE_SCRIPT__
+          REPORT_REBASE_SCRIPT_EOF
+          chmod +x "$RUNNER_TEMP/checkRebase.sh" "$RUNNER_TEMP/reportRebase.sh"
+
+          # The full ref keeps a tag named like the base branch from winning the fetch.
+          git fetch --no-tags origin "refs/heads/$BASE"
+
+          rc=0
+          reason=$("$RUNNER_TEMP/checkRebase.sh" "$(git rev-parse FETCH_HEAD)" "$HEAD_SHA" "origin/$BASE") || rc=$?
+
+          if [ "$rc" -gt 1 ]; then
+              echo "::error::checkRebase.sh failed unexpectedly (exit $rc)"
+              exit "$rc"
+          fi
+
+          ok=true
+          [ "$rc" -eq 0 ] || ok=false
+          [ -n "$reason" ] || reason="verification produced no diagnosis (exit $rc)"
+
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+          printf '%s' "$reason" > "$RUNNER_TEMP/rebaseReason.txt"
+          echo "$reason"
+
+      - name: Report on the pull request
+        continue-on-error: true
+        env:
+          OK: ${{ steps.check.outputs.ok }}
+        run: |
+          REASON=$(cat "$RUNNER_TEMP/rebaseReason.txt") "$RUNNER_TEMP/reportRebase.sh"
+
+      - name: Fail when the branch is not rebased
+        if: steps.check.outputs.ok == 'false'
+        run: |
+          echo "::error::$(tr '\n' ' ' < "$RUNNER_TEMP/rebaseReason.txt")"
+          exit 1
