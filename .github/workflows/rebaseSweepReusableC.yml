@@ -1,0 +1,46 @@
+name: Rebase Sweep (reusable)
+
+run-name: "CI: Re-check open pull requests"
+
+on:
+  workflow_call:
+    inputs:
+      workflowPath:
+        description: Path of the rebase check workflow whose latest run is replayed
+        type: string
+        default: .github/workflows/enforceRebase.yml
+
+permissions: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      BASE: ${{ github.ref_name }}
+      WORKFLOW_PATH: ${{ inputs.workflowPath }}
+    steps:
+      - name: Replay the latest green check of every open pull request on this branch
+        run: |
+          set -uo pipefail
+          max=50
+          # A run lists the pull requests that are still open for its head, so no pull request permission is needed.
+          runs=$(gh api "repos/$REPO/actions/runs?event=pull_request&status=completed&per_page=100" \
+              --jq '[.workflow_runs[]|select(.path==env.WORKFLOW_PATH and (.pull_requests|length)>0 and .pull_requests[0].base.ref==env.BASE)]|group_by(.pull_requests[0].number)|map(sort_by(.created_at)|last)|.[]|[.pull_requests[0].number,.id,(.conclusion//"")]|@tsv') \
+              || { echo "::warning::could not list the check runs"; exit 0; }
+          reran=0
+          while IFS=$'\t' read -r number id conclusion; do
+              [ -n "$number" ] || continue
+              [ "$conclusion" = success ] || { echo "#$number latest run $id is $conclusion: nothing to change"; continue; }
+              [ "$reran" -lt "$max" ] || { echo "::warning::limit of $max reruns reached"; break; }
+              if gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
+                  echo "#$number: replayed run $id"
+                  reran=$((reran + 1))
+              else
+                  echo "::warning::#$number: could not replay run $id"
+              fi
+          done <<< "$runs"
+          echo "replayed: $reran"
