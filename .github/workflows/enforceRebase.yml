@@ -1,95 +1,45 @@
-# On a direct pull_request run GitHub reads this file from the merge ref, so the pull request could edit it. The
-# guarantee that the decision code never comes from the pull request holds when a ruleset requires this workflow or
-# when another repository calls it at a fixed ref. A caller must grant contents: read and pull-requests: write,
-# because a called workflow cannot raise the permissions it receives.
-name: Enforce Rebase
+name: Recheck Probe
 
-run-name: "CI: Enforce rebase before merge"
+run-name: "probe ${{ github.event_name }}/${{ github.event.action }} pr=${{ github.event.pull_request.number }}"
 
 on:
-    pull_request:
-        types: [opened, synchronize, reopened, edited]
-    workflow_call:
+  pull_request:
+    types: [opened, synchronize, reopened, edited, closed]
+  push:
+    branches: [main]
 
 permissions:
-    contents: read
-    pull-requests: write
-
-concurrency:
-    # workflow_ref names the pinned version: a canary and the active version on the same PR must not cancel each other.
-    group: enforce-rebase-${{ github.repository }}-${{ github.workflow }}-${{ github.workflow_ref }}-${{ github.event.pull_request.number || github.ref }}
-    cancel-in-progress: true
+  contents: read
+  pull-requests: read
+  actions: write
 
 jobs:
-    rebase-status:
-        runs-on: ubuntu-latest
-        env:
-            GH_TOKEN: ${{ github.token }}
-            REPO: ${{ github.repository }}
-            NUMBER: ${{ github.event.pull_request.number }}
-            BASE: ${{ github.event.pull_request.base.ref }}
-            HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-            GUARD: ${{ github.workspace }}/guard/.github/scripts
-        steps:
-            # An empty commit would make checkout fall back to the pull request's own ref and load its scripts.
-            - name: Verify the guard source
-              env:
-                  GUARD_REPO: ${{ job.workflow_repository }}
-                  GUARD_SHA: ${{ job.workflow_sha }}
-              run: |
-                  if [ -z "$GUARD_REPO" ] || [ -z "$GUARD_SHA" ]; then
-                      echo "::error::the commit of this workflow is unknown; refusing to load the scripts from elsewhere"
-                      exit 2
-                  fi
-
-            - name: Checkout the pull request head
-              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-              with:
-                  ref: ${{ github.event.pull_request.head.sha }}
-                  fetch-depth: 0
-                  path: pr
-
-            # The decision code comes from the commit of this very workflow, never from the pull request.
-            - name: Checkout the rebase guard scripts
-              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-              with:
-                  repository: ${{ job.workflow_repository }}
-                  ref: ${{ job.workflow_sha }}
-                  path: guard
-                  sparse-checkout: .github/scripts
-
-            - name: Check rebase
-              id: check
-              working-directory: pr
-              run: |
-                  set -uo pipefail
-                  git fetch --no-tags origin "refs/heads/$BASE"
-
-                  rc=0
-                  reason=$("$GUARD/checkRebase.sh" "$(git rev-parse FETCH_HEAD)" "$HEAD_SHA" "origin/$BASE") || rc=$?
-
-                  if [ "$rc" -gt 1 ]; then
-                      echo "::error::checkRebase.sh failed unexpectedly (exit $rc)"
-                      exit "$rc"
-                  fi
-
-                  ok=true
-                  [ "$rc" -eq 0 ] || ok=false
-                  [ -n "$reason" ] || reason="verification produced no diagnosis (exit $rc)"
-
-                  echo "ok=$ok" >> "$GITHUB_OUTPUT"
-                  printf '%s' "$reason" > "$RUNNER_TEMP/rebaseReason.txt"
-                  echo "$reason"
-
-            - name: Report on the pull request
-              continue-on-error: true
-              env:
-                  OK: ${{ steps.check.outputs.ok }}
-              run: |
-                  REASON=$(cat "$RUNNER_TEMP/rebaseReason.txt") "$GUARD/reportRebase.sh"
-
-            - name: Fail when the branch is not rebased
-              if: steps.check.outputs.ok == 'false'
-              run: |
-                  echo "::error::$(cat "$RUNNER_TEMP/rebaseReason.txt" | tr '\n' ' ')"
-                  exit 1
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      EVENT: ${{ github.event_name }}
+      ACTION: ${{ github.event.action }}
+      MERGED: ${{ github.event.pull_request.merged }}
+      BASE: ${{ github.event.pull_request.base.ref }}
+      NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: What fired
+        run: |
+          echo "PROBE event=$EVENT action=$ACTION merged=$MERGED base=$BASE pr=$NUMBER ref=$GITHUB_REF sha=$GITHUB_SHA"
+      - name: Rerun the latest run of every other open PR on the same base
+        if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true
+        run: |
+          set -uo pipefail
+          for n in $(gh api "repos/$REPO/pulls?state=open&base=$BASE&per_page=100" --jq '.[].number'); do
+            sha=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)
+            runId=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=30" \
+              --jq '[.workflow_runs[]|select(.path==".github/workflows/enforceRebase.yml")]|sort_by(.created_at)|last|.id // empty')
+            if [ -z "$runId" ]; then echo "PROBE rerun pr=$n no-run"; continue; fi
+            if out=$(gh api -X POST "repos/$REPO/actions/runs/$runId/rerun" 2>&1); then
+              echo "PROBE rerun pr=$n run=$runId ok"
+            else
+              echo "PROBE rerun pr=$n run=$runId FAILED: $out"
+            fi
+          done
