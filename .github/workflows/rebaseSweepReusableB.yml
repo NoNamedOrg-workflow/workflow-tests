@@ -1,0 +1,52 @@
+name: Rebase Sweep (reusable)
+
+run-name: "CI: Re-check open pull requests"
+
+on:
+  workflow_call:
+    inputs:
+      workflowPath:
+        description: Path of the rebase check workflow whose latest run is replayed
+        type: string
+        default: .github/workflows/enforceRebase.yml
+
+permissions: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      BASE: ${{ github.ref_name }}
+      WORKFLOW_PATH: ${{ inputs.workflowPath }}
+    steps:
+      - name: Replay the check of the open pull requests
+        run: |
+          set -uo pipefail
+          max=50
+          prs=$(gh api "repos/$REPO/pulls?state=open&base=$BASE&per_page=100" --jq '.[]|[.number,.head.sha]|@tsv') \
+              || { echo "::warning::could not list the open pull requests"; exit 0; }
+          reran=0
+          while IFS=$'\t' read -r number sha; do
+              [ -n "$number" ] || continue
+              runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=50" \
+                  --jq '[.workflow_runs[]|select(.path==env.WORKFLOW_PATH)]|group_by(.workflow_id)|map(sort_by(.created_at)|last)|.[]|[.id,.status,(.conclusion//"")]|@tsv') \
+                  || { echo "::warning::#$number: could not read its runs"; continue; }
+              [ -n "$runs" ] || { echo "::notice::#$number has no check run yet: skipped"; continue; }
+              while IFS=$'\t' read -r id status conclusion; do
+                  [ "$status" = completed ] || { echo "::notice::#$number run $id is $status: skipped"; continue; }
+                  [ "$conclusion" = success ] || { echo "#$number run $id already $conclusion: nothing to change"; continue; }
+                  [ "$reran" -lt "$max" ] || { echo "::warning::limit of $max reruns reached"; break 2; }
+                  if gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
+                      echo "#$number: replayed run $id"
+                      reran=$((reran + 1))
+                  else
+                      echo "::warning::#$number: could not replay run $id"
+                  fi
+              done <<< "$runs"
+          done <<< "$prs"
+          echo "replayed: $reran"
