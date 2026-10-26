@@ -1,0 +1,26 @@
+# Example caller, copied into each repository. The default branch differs per repository (main, master, development):
+# change it in the push trigger below, since a push to it is what moves the base of the open pull requests.
+name: rebase-sweep
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: base-moved replays the green checks; recover replays the failed ones of the last 24 hours
+        type: choice
+        options: [base-moved, recover]
+        default: base-moved
+
+permissions: {}
+
+jobs:
+  sweep:
+    # A reusable workflow cannot hold more permissions than its caller grants it, so the job states them.
+    permissions:
+      actions: write
+      pull-requests: read
+    uses: NoNamedOrg-workflow/workflow-tests/.github/workflows/reusableRebaseSweep.yml@main
+    with:
+      mode: ${{ inputs.mode || 'base-moved' }}

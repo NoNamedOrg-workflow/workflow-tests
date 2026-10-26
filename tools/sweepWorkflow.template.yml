@@ -1,0 +1,53 @@
+# Generated from tools/sweepWorkflow.template.yml by tools/buildSweepWorkflow.sh: edit the template or the script
+# under .github/scripts, never this file. The script is embedded because an internal repository cannot download the
+# scripts of another repository with the default token.
+name: Rebase Sweep (reusable)
+
+run-name: "CI: Re-check open pull requests"
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: base-moved replays the green checks of the open pull requests; recover replays the failed ones of a time window
+        type: string
+        default: base-moved
+      windowHours:
+        description: Size of the time window, in hours, that recover mode looks back
+        type: string
+        default: "24"
+      workflowPath:
+        description: Path of the rebase check workflow whose latest run is replayed
+        type: string
+        default: .github/workflows/enforceRebase.yml
+
+permissions: {}
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    # The sweep only replays runs: the label and the comment are written by the replayed check with its own token.
+    permissions:
+      actions: write
+      pull-requests: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      BASE: ${{ github.ref_name }}
+      MODE: ${{ inputs.mode }}
+      WINDOW_HOURS: ${{ inputs.windowHours }}
+      WORKFLOW_PATH: ${{ inputs.workflowPath }}
+    steps:
+      - name: Replay the check of the open pull requests
+        run: |
+          set -uo pipefail
+          cat > "$RUNNER_TEMP/recheckSweep.sh" <<'RECHECK_SWEEP_SCRIPT_EOF'
+__RECHECK_SWEEP_SCRIPT__
+          RECHECK_SWEEP_SCRIPT_EOF
+          chmod +x "$RUNNER_TEMP/recheckSweep.sh"
+          if [ "$MODE" = recover ]; then
+              [[ "$WINDOW_HOURS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::windowHours must be a positive integer"; exit 2; }
+              SINCE=$(date -u -d "-${WINDOW_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)
+              export SINCE
+          fi
+          "$RUNNER_TEMP/recheckSweep.sh"
