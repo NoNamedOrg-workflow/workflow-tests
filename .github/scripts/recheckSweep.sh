@@ -7,6 +7,7 @@ mode=${MODE:-base-moved}
 since=${SINCE:-}
 maxReplays=${MAX_REPLAYS:-50}
 replayed=0
+attempts=0
 
 # The sweep runs on every push to the default branch, so a bad setting is the only thing allowed to fail it.
 abort() {
@@ -14,13 +15,18 @@ abort() {
     exit 2
 }
 
+timestampPattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+
 validateConfig() {
     [[ "${REPO:-}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || abort "REPO must be owner/repo"
+    # A dot segment would climb out of repos/ in the API path.
+    [ "${REPO%%/*}" != . ] && [ "${REPO%%/*}" != .. ] && [ "${REPO#*/}" != . ] && [ "${REPO#*/}" != .. ] \
+        || abort "REPO must be owner/repo"
     [ -n "${BASE:-}" ] || abort "BASE is required"
     [ "$mode" = base-moved ] || [ "$mode" = recover ] || abort "MODE must be base-moved or recover"
     [[ "$maxReplays" =~ ^[1-9][0-9]*$ ]] || abort "MAX_REPLAYS must be a positive integer"
     [ "$mode" = recover ] || return 0
-    [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || abort "SINCE must be YYYY-MM-DDTHH:MM:SSZ in recover mode"
+    [[ "$since" =~ $timestampPattern ]] || abort "SINCE must be YYYY-MM-DDTHH:MM:SSZ in recover mode"
 }
 
 listPulls() {
@@ -38,7 +44,7 @@ latestRuns() {
         | group_by(.workflow_id)
         | map(sort_by(.created_at) | last)
         | .[]
-        | [(.id | tostring), (.status | tostring), (.updated_at | tostring), (.conclusion // "none")]
+        | [(.id | tostring), (.status | tostring), (.updated_at | tostring | select(. != "") // "null"), (.conclusion // "none")]
         | @tsv'
 }
 
@@ -58,6 +64,10 @@ selectRecover() {
             return 1
             ;;
     esac
+    if [[ ! "$updated" =~ $timestampPattern ]]; then
+        echo "::notice::#$number run $id has no valid update time: skipped"
+        return 1
+    fi
     [[ "$updated" < "$since" ]] || return 0
     echo "::notice::#$number run $id older than $since: skipped"
     return 1
@@ -76,7 +86,7 @@ shouldReplay() {
 # Returns 3 when the ceiling is reached so the caller stops the whole sweep.
 replay() {
     local number=$1 id=$2
-    if [ "$replayed" -ge "$maxReplays" ]; then
+    if [ "$attempts" -ge "$maxReplays" ]; then
         echo "::warning::limit of $maxReplays reruns reached"
         return 3
     fi
@@ -84,6 +94,7 @@ replay() {
         echo "::warning::#$number: run id is not numeric: skipped"
         return 0
     fi
+    attempts=$((attempts + 1))
     if ! gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
         echo "::warning::#$number: could not replay run $id"
         return 0
@@ -111,6 +122,8 @@ main() {
     local pulls prs total number sha
     validateConfig
     pulls=$(listPulls) || { echo "::warning::could not list the open pull requests"; return 0; }
+    echo "$pulls" | jq -e 'type == "array"' > /dev/null \
+        || { echo "::warning::could not read the pull request listing"; return 0; }
     prs=$(echo "$pulls" | jq -r '.[] | [(.number | tostring), (.head.sha | tostring)] | @tsv') \
         || { echo "::warning::could not read the pull request listing"; return 0; }
     total=$(echo "$pulls" | jq 'length')

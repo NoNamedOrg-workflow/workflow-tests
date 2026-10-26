@@ -228,14 +228,18 @@ has "warns about #1" "::warning::#1: could not read its runs" "$output"
 has "replays #2" "runs/20/rerun" "$calls"
 
 reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-runsFor "$(sha 2)" "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")"
+for n in 1 2 3; do
+    runsFor "$(sha "$n")" "$(mkRun "$(( n * 10 ))" 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+done
 touch "$fx/failPost-10"
-run
-expect "T-S10 a failing rerun warns, goes on and is not counted" 0
+run MAX_REPLAYS=2
+expect "T-S10 a failing rerun warns, goes on, consumes the ceiling and is not counted" 0
 has "warns" "::warning::#1: could not replay run 10" "$output"
 has "tries the next" "runs/20/rerun" "$calls"
+lacks "the ceiling stops the third attempt" "runs/30/rerun" "$calls"
+countIs "two attempts" "/rerun" 2 "$calls"
+has "reports the ceiling" "::warning::limit of 2 reruns reached" "$output"
 has "counts only the success" "replayed: 1" "$(echo "$output" | tail -n 1)"
 lacks "the failed one is not reported as replayed" "#1: replayed" "$output"
 
@@ -256,6 +260,20 @@ run MAX_REPLAYS=5
 expect "T-S11b exactly at the ceiling there is no warning" 0
 countIs "five reruns" "/rerun" 5 "$calls"
 lacks "no limit warning" "limit of" "$output"
+
+reset
+items=()
+for n in 1 2 3 4 5; do
+    items+=("$(pr "$n" "$(sha "$n")")")
+    runsFor "$(sha "$n")" "$(mkRun "$(( n * 10 ))" 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+    touch "$fx/failPost-$(( n * 10 ))"
+done
+pulls "${items[@]}"
+run MAX_REPLAYS=2
+expect "T-S11c reruns that fail exhaust the ceiling" 0
+countIs "exactly two attempts" "/rerun" 2 "$calls"
+countIs "a single limit warning" "::warning::limit of 2 reruns reached" 1 "$output"
+has "no success is counted" "replayed: 0" "$(echo "$output" | tail -n 1)"
 
 reset
 items=()
@@ -300,7 +318,7 @@ lacks "no rerun" "/rerun" "$calls"
 reset
 greenPr 1
 for bad in REPO=norepo REPO='o/r;id' MODE=weird MODE=recover "MODE=recover SINCE=2026-03-01" "MODE=recover SINCE=ontem" \
-    MAX_REPLAYS=0 MAX_REPLAYS=abc MAX_REPLAYS=-3 BASE=; do
+    MAX_REPLAYS=0 MAX_REPLAYS=abc MAX_REPLAYS=-3 BASE= REPO=. REPO=.. REPO=a/.. REPO=../.. REPO=../r REPO=o/. REPO=./r; do
     run $bad
     expect "T-S14 invalid configuration '$bad' exits 2" 2
     [ -z "$calls" ] || { failed=$((failed + 1)); echo "FAIL T-S14 '$bad' called gh: $calls"; }
@@ -352,6 +370,113 @@ lacks "no token in the output" "$token" "$output"
 lacks "no token in the gh calls" "$token" "$calls"
 run REPO=bad
 lacks "no token on a configuration error" "$token" "$output"
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+echo 'this is not json' > "$fx/runs-$(sha 1).json"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+run
+expect "T-S19 a runs answer that is not JSON warns and the other pull requests go on" 0
+has "warns about #1" "::warning::#1: could not read its runs" "$output"
+has "replays #2" "runs/20/rerun" "$calls"
+countIs "one rerun only" "/rerun" 1 "$calls"
+
+reset
+echo 'this is not json' > "$fx/pulls.json"
+run
+expect "T-S20 a pull request listing that is not JSON warns and posts nothing" 0
+has "warns" "::warning::could not read the pull request listing" "$output"
+lacks "no rerun" "/rerun" "$calls"
+
+reset
+echo '{"message":"Not Found"}' > "$fx/pulls.json"
+run
+expect "T-S20b a listing object with an error message warns and posts nothing" 0
+has "warns" "::warning::" "$output"
+lacks "no rerun" "/rerun" "$calls"
+
+reset
+echo "{\"a\":$(pr 1 "$(sha 1)")}" > "$fx/pulls.json"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+run
+expect "T-S20c a listing that is an object of pull requests is not an array and posts nothing" 0
+has "warns" "::warning::" "$output"
+lacks "no rerun" "/rerun" "$calls"
+
+reset
+echo 'null' > "$fx/pulls.json"
+run
+expect "T-S20d a null listing warns and posts nothing" 0
+has "warns" "::warning::" "$output"
+lacks "no rerun" "/rerun" "$calls"
+
+reset
+echo '[1]' > "$fx/pulls.json"
+run
+expect "T-S20e a list whose items are not pull requests warns and posts nothing" 0
+has "warns" "::warning::could not read the pull request listing" "$output"
+lacks "no rerun" "/rerun" "$calls"
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-02-01T00:00:00Z completed failure 2026-03-02T00:00:00Z)"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-03-02T00:00:00Z completed failure 2026-02-01T00:00:00Z)"
+run MODE=recover SINCE=2026-03-01T00:00:00Z
+expect "T-S21 the recover window is judged by updated_at, not created_at" 0
+has "created before but updated after SINCE is replayed" "runs/10/rerun" "$calls"
+lacks "created after but updated before SINCE is not replayed" "runs/20/rerun" "$calls"
+has "reports the old one" "#2 run 20 older than 2026-03-01T00:00:00Z: skipped" "$output"
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed '' 2026-01-01T00:00:00Z)"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-03-02T00:00:00Z completed '' 2026-03-02T00:00:00Z)"
+run
+expect "T-S22 a completed run without a conclusion is treated as none" 0
+has "says none in base-moved" "#1 run 10 already none: nothing to change" "$output"
+lacks "no rerun" "/rerun" "$calls"
+run MODE=recover SINCE=2026-03-01T00:00:00Z
+expect "T-S22b a completed run without a conclusion is treated as none in recover" 0
+has "says none in recover" "#2 run 20 already none: nothing to change" "$output"
+lacks "no rerun in recover" "/rerun" "$calls"
+
+reset
+pulls "$(pr 1 "$(sha 1)")"
+printf '{"workflow_runs":[%s]}' "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure 2026-03-02T00:00:00Z | jq -c '.updated_at = null')" \
+    > "$fx/runs-$(sha 1).json"
+run MODE=recover SINCE=2026-03-01T00:00:00Z
+expect "T-S23 a JSON null update time is not replayed in recover" 0
+lacks "no rerun" "/rerun" "$calls"
+has "says why" "::notice::#1 run 10 has no valid update time: skipped" "$output"
+
+for badTime in null yesterday 2026-03-02 2026-03-02T00:00:00z "2026-03-02 00:00:00Z" 2026-03-02T00:00:00Z.5 ''; do
+    reset
+    pulls "$(pr 1 "$(sha 1)")"
+    runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure "$badTime")"
+    run MODE=recover SINCE=2026-03-01T00:00:00Z
+    expect "T-S23b update time '$badTime' is not replayed in recover" 0
+    lacks "'$badTime' no rerun" "/rerun" "$calls"
+    has "'$badTime' says why" "::notice::#1 run 10 has no valid update time: skipped" "$output"
+done
+
+reset
+pulls "$(pr 1 "$(sha 1)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed success null)"
+run MODE=recover SINCE=2026-03-01T00:00:00Z
+expect "T-S23c a success without a valid update time still says nothing to change" 0
+has "conclusion is judged first" "#1 run 10 already success: nothing to change" "$output"
+
+reset
+pulls "$(pr 1 "$(sha 1)0")" "$(pr 2 ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD)" "$(pr 3 "$(sha 3)")"
+runsFor "$(sha 1)0" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+runsFor ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+runsFor "$(sha 3)" "$(mkRun 30 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+run
+expect "T-S24 a 41 character sha and an uppercase sha are malformed and skipped" 0
+countIs "two malformed warnings" "::warning::skipped a pull request with a malformed number or sha" 2 "$output"
+lacks "41 character sha not replayed" "runs/10/rerun" "$calls"
+lacks "uppercase sha not replayed" "runs/20/rerun" "$calls"
+has "the valid one is replayed" "runs/30/rerun" "$calls"
 
 echo "recheckSweep: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
