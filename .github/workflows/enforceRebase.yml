@@ -1,47 +1,31 @@
 name: Recheck Probe
 
-run-name: "probe ${{ github.event_name }}/${{ github.event.action }} pr=${{ github.event.pull_request.number }}"
+run-name: "probe ${{ github.event_name }}/${{ github.event.action }}"
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, edited, closed, labeled, unlabeled, ready_for_review, converted_to_draft, auto_merge_enabled, auto_merge_disabled, assigned, review_requested]
-  pull_request_target:
-    types: [opened, synchronize, reopened, edited, closed, labeled]
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
+  status:
+  create:
+  delete:
   push:
-    branches: [main]
+  repository_dispatch:
+  workflow_run:
+    workflows: [Dummy]
+    types: [completed]
+  workflow_dispatch:
 
 permissions:
   contents: read
-  pull-requests: read
-  actions: write
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      EVENT: ${{ github.event_name }}
-      ACTION: ${{ github.event.action }}
-      MERGED: ${{ github.event.pull_request.merged }}
-      BASE: ${{ github.event.pull_request.base.ref }}
-      NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: What fired
-        run: |
-          echo "VERSION=2 PROBE event=$EVENT action=$ACTION merged=$MERGED base=$BASE pr=$NUMBER ref=$GITHUB_REF sha=$GITHUB_SHA"
-      - name: Rerun the latest run of every other open PR on the same base
-        if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action == 'closed' && github.event.pull_request.merged == true
-        run: |
-          set -uo pipefail
-          for n in $(gh api "repos/$REPO/pulls?state=open&base=$BASE&per_page=100" --jq '.[].number'); do
-            sha=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)
-            runId=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=30" \
-              --jq '[.workflow_runs[]|select(.path==".github/workflows/enforceRebase.yml")]|sort_by(.created_at)|last|.id // empty')
-            if [ -z "$runId" ]; then echo "PROBE rerun pr=$n no-run"; continue; fi
-            if out=$(gh api -X POST "repos/$REPO/actions/runs/$runId/rerun" 2>&1); then
-              echo "PROBE rerun pr=$n run=$runId ok"
-            else
-              echo "PROBE rerun pr=$n run=$runId FAILED: $out"
-            fi
-          done
+      - run: echo "PROBE event=${{ github.event_name }} action=${{ github.event.action }}"
