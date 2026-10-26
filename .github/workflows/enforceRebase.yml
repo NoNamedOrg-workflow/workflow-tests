@@ -29,7 +29,7 @@ jobs:
     steps:
       - name: What fired
         run: |
-          echo "PROBE event=$EVENT action=$ACTION merged=$MERGED base=$BASE pr=$NUMBER ref=$GITHUB_REF sha=$GITHUB_SHA"
+          echo "VERSION=1 PROBE event=$EVENT action=$ACTION merged=$MERGED base=$BASE pr=$NUMBER ref=$GITHUB_REF sha=$GITHUB_SHA"
       - name: Rerun the latest run of every other open PR on the same base
         if: (github.event_name == 'pull_request' || github.event_name == 'pull_request_target') && github.event.action == 'closed' && github.event.pull_request.merged == true
         run: |
