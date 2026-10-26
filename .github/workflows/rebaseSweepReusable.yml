@@ -5,10 +5,10 @@ run-name: "CI: Re-check open pull requests"
 on:
   workflow_call:
     inputs:
-      workflowName:
-        description: Name of the rebase check whose latest run is replayed
+      workflowPath:
+        description: Path of the rebase check workflow whose latest run is replayed
         type: string
-        default: Enforce Rebase
+        default: .github/workflows/enforceRebase.yml
 
 permissions: {}
 
@@ -24,7 +24,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       BASE: ${{ github.ref_name }}
-      WORKFLOW_NAME: ${{ inputs.workflowName }}
+      WORKFLOW_PATH: ${{ inputs.workflowPath }}
     steps:
       - name: Replay the check of the pull requests that fell behind
         run: |
@@ -36,22 +36,24 @@ jobs:
           reran=0
           while IFS=$'\t' read -r number sha; do
               [ -n "$number" ] || continue
-              run=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=50" \
-                  --jq "[.workflow_runs[]|select(.name==env.WORKFLOW_NAME)]|sort_by(.created_at)|last|select(.!=null)|[.id,.status,(.conclusion//\"\")]|@tsv") \
+              runs=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=50" \
+                  --jq '[.workflow_runs[]|select(.path==env.WORKFLOW_PATH)]|group_by(.workflow_id)|map(sort_by(.created_at)|last)|.[]|[.id,.status,(.conclusion//"")]|@tsv') \
                   || { echo "::warning::#$number: could not read its runs"; continue; }
-              [ -n "$run" ] || { echo "::notice::#$number has no $WORKFLOW_NAME run yet: skipped"; continue; }
-              IFS=$'\t' read -r id status conclusion <<< "$run"
-              [ "$status" = completed ] || { echo "::notice::#$number run $id is $status: skipped"; continue; }
-              [ "$conclusion" = success ] || { echo "#$number already $conclusion: nothing to change"; continue; }
-              behind=$(gh api "repos/$REPO/compare/$BASE...$sha" --jq .behind_by) \
-                  || { echo "::warning::#$number: could not compare with $BASE"; continue; }
-              [ "$behind" -gt 0 ] || { echo "#$number is still up to date"; continue; }
-              [ "$reran" -lt "$max" ] || { echo "::warning::limit of $max reruns reached"; break; }
-              if gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
-                  echo "#$number is $behind commit(s) behind $BASE: replayed run $id"
-                  reran=$((reran + 1))
-              else
-                  echo "::warning::#$number: could not replay run $id"
-              fi
+              [ -n "$runs" ] || { echo "::notice::#$number has no $WORKFLOW_PATH run yet: skipped"; continue; }
+              behind=""
+              while IFS=$'\t' read -r id status conclusion; do
+                  [ "$status" = completed ] || { echo "::notice::#$number run $id is $status: skipped"; continue; }
+                  [ "$conclusion" = success ] || { echo "#$number run $id already $conclusion: nothing to change"; continue; }
+                  [ -n "$behind" ] || behind=$(gh api "repos/$REPO/compare/$BASE...$sha" --jq .behind_by) \
+                      || { echo "::warning::#$number: could not compare with $BASE"; continue; }
+                  [ "$behind" -gt 0 ] || { echo "#$number is still up to date"; continue; }
+                  [ "$reran" -lt "$max" ] || { echo "::warning::limit of $max reruns reached"; break 2; }
+                  if gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
+                      echo "#$number is $behind commit(s) behind $BASE: replayed run $id"
+                      reran=$((reran + 1))
+                  else
+                      echo "::warning::#$number: could not replay run $id"
+                  fi
+              done <<< "$runs"
           done <<< "$prs"
           echo "replayed: $reran"
