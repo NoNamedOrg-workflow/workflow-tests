@@ -1,6 +1,6 @@
 name: Recheck Probe
 
-run-name: "probe ${{ github.event_name }}/${{ github.event.action }} pr=${{ github.event.pull_request.number }}"
+run-name: "probe ${{ github.event_name }}/${{ github.event.action }} pr=${{ github.event.pull_request.number }} attempt=${{ github.run_attempt }}"
 
 on:
   pull_request:
@@ -8,32 +8,9 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
-  actions: write
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      REPO: ${{ github.repository }}
-      BASE: ${{ github.event.pull_request.base.ref }}
-      NUMBER: ${{ github.event.pull_request.number }}
     steps:
-      - name: Sweep the other open PRs on the same base
-        run: |
-          set -uo pipefail
-          echo "PROBE sweep from pr=$NUMBER base=$BASE"
-          for n in $(gh api "repos/$REPO/pulls?state=open&base=$BASE&per_page=100" --jq '.[].number'); do
-            [ "$n" = "$NUMBER" ] && continue
-            sha=$(gh api "repos/$REPO/pulls/$n" --jq .head.sha)
-            cmp=$(gh api "repos/$REPO/compare/$BASE...$sha" --jq '"behind_by=\(.behind_by) ahead_by=\(.ahead_by) status=\(.status)"')
-            runId=$(gh api "repos/$REPO/actions/runs?head_sha=$sha&event=pull_request&per_page=30" \
-              --jq '[.workflow_runs[]|select(.path==".github/workflows/enforceRebase.yml")]|sort_by(.created_at)|last|.id // empty')
-            if [ -z "$runId" ]; then echo "PROBE pr=$n $cmp no-run"; continue; fi
-            if out=$(gh api -X POST "repos/$REPO/actions/runs/$runId/rerun" 2>&1); then
-              echo "PROBE pr=$n $cmp run=$runId rerun-ok"
-            else
-              echo "PROBE pr=$n $cmp run=$runId rerun-FAILED: $out"
-            fi
-          done
+      - run: echo "PROBE inert attempt=${{ github.run_attempt }}"
