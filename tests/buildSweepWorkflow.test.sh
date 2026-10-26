@@ -58,10 +58,15 @@ def structureProblems(doc)
     found << "trigger" unless trigger.keys == ["workflow_call"]
     found << "name" unless doc["name"] == "Rebase Sweep (reusable)"
     found << "topPermissions" unless doc["permissions"] == {}
+    found << "topConcurrency" if doc.key?("concurrency")
     jobs = hashOf(doc["jobs"])
     found << "oneJob" unless jobs.keys == ["sweep"]
     job = hashOf(jobs["sweep"])
     found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
+    found << "concurrency" unless job["concurrency"] == {
+        "group" => "rebase-sweep-${{ github.repository }}-${{ github.ref_name }}",
+        "cancel-in-progress" => true,
+    }
     expectedEnv = {
         "GH_TOKEN" => "${{ github.token }}",
         "REPO" => "${{ github.repository }}",
@@ -79,10 +84,11 @@ def textProblems(text)
     found = []
     lines = text.lines.map(&:chomp)
     allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath)) \}\}\z/
+    group = /\A      group: rebase-sweep-\$\{\{ github\.repository \}\}-\$\{\{ github\.ref_name \}\}\z/
     found << "uses" if lines.any? { |line| line =~ /\A\s*(- )?uses:/ }
     found << "eventData" if text =~ /github\.event|github\.head_ref/
     found << "secrets" if text =~ /secrets\./
-    found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed }
+    found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed || line =~ group }
     return found
 end
 
@@ -150,8 +156,8 @@ check "T-RF21-d/shape-1 the committed workflow breaks no structure rule" test ! 
 check "T-RF21-d/shape-2 the workflow holds no uses: line" test "$(grep -c -E '^\s*(- )?uses:' "$dist")" -eq 0
 check "T-RF21-d/shape-3 no event data and no head_ref reach the file" \
     bash -c '! grep -q -E "github\.event|github\.head_ref" "$1"' _ "$dist"
-check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values" \
-    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$"' _ "$dist"
+check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values and the concurrency group" \
+    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$" | grep -v -F -x "      group: rebase-sweep-\${{ github.repository }}-\${{ github.ref_name }}"' _ "$dist"
 check "T-RF21-d/shape-5 the script is indented at ten spaces and blank lines stay empty" \
     bash -c '! grep -q -E "^ +$" "$1"' _ "$dist"
 
@@ -177,6 +183,12 @@ expectMutation eventInRun eventData '{ print } /set -uo pipefail/ { print "     
 expectMutation eventInRunExpr expression '{ print } /set -uo pipefail/ { print "          echo \"${{ github.event.pull_request.title }}\"" }'
 expectMutation headRefInEnv eventData '{ sub(/github\.ref_name/, "github.head_ref"); print }'
 expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.mode }}\"" }'
+expectMutation noConcurrency concurrency '/^    concurrency:/ { skip = 2; next } skip > 0 { skip--; next } { print }'
+expectMutation noCancel concurrency '{ sub(/cancel-in-progress: true/, "cancel-in-progress: false"); print }'
+expectMutation eventInGroup eventData '{ sub(/-\$\{\{ github\.ref_name \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
+expectMutation eventInGroupExpr expression '{ sub(/-\$\{\{ github\.ref_name \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
+expectMutation inputInGroup expression '{ sub(/-\$\{\{ github\.ref_name \}\}$/, "-${{ inputs.mode }}") } { print }'
+expectMutation topConcurrency topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency: sweep" }'
 expectMutation wrongDefault inputs '{ sub(/default: base-moved/, "default: recover"); print }'
 
 # REFUSALS: exit 2, a message naming the cause and no output file at all (not even a partial one).
@@ -277,14 +289,20 @@ echo 2026-01-01T00:00:00Z
 FAKE
 chmod +x "$work/fakeBin/chmod" "$work/fakeBin/date"
 
-# runStep YAML MODE WINDOW_HOURS: leaves the output in $stepOut and the exit code in $stepStatus.
+# A date that cannot do the arithmetic, as on a runner image without GNU date.
+mkdir -p "$work/brokenDateBin"
+cp "$work/fakeBin/chmod" "$work/brokenDateBin/chmod"
+printf '#!/usr/bin/env bash\necho "date: invalid option" >&2\nexit 1\n' > "$work/brokenDateBin/date"
+chmod +x "$work/brokenDateBin/chmod" "$work/brokenDateBin/date"
+
+# runStep YAML MODE WINDOW_HOURS [BINDIR]: leaves the output in $stepOut and the exit code in $stepStatus.
 runStep() {
     local body="$work/step.sh"
     runBody "$1" > "$body"
     rm -rf "$work/scene"
     mkdir -p "$work/scene/tmp"
     : > "$work/date.log"
-    stepOut=$(cd "$work/scene" && env PATH="$work/fakeBin:$PATH" MODE="$2" WINDOW_HOURS="$3" RUNNER_TEMP="$work/scene/tmp" \
+    stepOut=$(cd "$work/scene" && env PATH="${4:-$work/fakeBin}:$PATH" MODE="$2" WINDOW_HOURS="$3" RUNNER_TEMP="$work/scene/tmp" \
         FAKE_DATE_LOG="$work/date.log" "$bashBin" -e "$body" 2>&1 < /dev/null)
     stepStatus=$?
 }
@@ -301,12 +319,21 @@ behaviorProblems() {
     echo "$stepOut" | grep -q -x 'probe SINCE=2026-01-01T00:00:00Z MODE=recover' || echo recoverSince
     grep -q -F -- '-6 hours' "$work/date.log" || echo recoverWindow
 
+    runStep "$1" recover 9999
+    [ "$stepStatus" -eq 0 ] || echo maxWindowExit
+    grep -q -F -- '-9999 hours' "$work/date.log" || echo maxWindow
+
+    runStep "$1" recover 6 "$work/brokenDateBin"
+    [ "$stepStatus" -eq 2 ] || echo brokenDateExit
+    echo "$stepOut" | grep -q 'probe' && echo brokenDateRanScript
+    echo "$stepOut" | grep -q -F '::error::' || echo brokenDateMessage
+
     local bad
-    for bad in 0 abc '1; touch x' '' '-3' '007'; do
+    for bad in 0 abc '1; touch x' '' '-3' '007' 10000 99999999999999; do
         runStep "$1" recover "$bad"
         [ "$stepStatus" -eq 2 ] || echo "invalidExit[$bad]"
         echo "$stepOut" | grep -q 'probe' && echo "invalidRanScript[$bad]"
-        echo "$stepOut" | grep -q -F 'windowHours must be a positive integer' || echo "invalidMessage[$bad]"
+        echo "$stepOut" | grep -q -F 'windowHours must be an integer from 1 to 9999' || echo "invalidMessage[$bad]"
         [ ! -e "$work/scene/x" ] || echo "invalidInjected[$bad]"
     done
     return 0
@@ -323,7 +350,7 @@ check "T-RF21-b/behavior-3 recover defines SINCE from the window" bash -c 'echo 
 runStep "$dist" recover '1; touch x'
 check "T-RF21-b/behavior-4 an injected window exits 2 and runs nothing" test "$stepStatus" -eq 2 -a ! -e "$work/scene/x"
 
-mutateTemplate noValidation '!/windowHours must be a positive integer/ { print }'
+mutateTemplate noValidation '!/windowHours must be an integer from 1 to 9999/ { print }'
 buildFrom noValidation
 behaviorProblems "$work/noValidation.yml" > "$work/noValidation.problems"
 check "T-RF21-b/mutant-noValidation the behavior cases fail when the window is not validated" test -s "$work/noValidation.problems"
@@ -332,6 +359,19 @@ mutateTemplate alwaysSince '{ sub(/\[ "\$MODE" = recover \]/, "true"); print }'
 buildFrom alwaysSince
 behaviorProblems "$work/alwaysSince.yml" > "$work/alwaysSince.problems"
 check "T-RF21-b/mutant-alwaysSince the behavior cases fail when base-moved also computes SINCE" test -s "$work/alwaysSince.problems"
+
+behaviorMutant() {
+    local name=$1 program=$2
+    mutateTemplate "$name" "$program"
+    buildFrom "$name"
+    behaviorProblems "$work/$name.yml" > "$work/$name.problems"
+    check "T-RF21-b/mutant-$name the behavior cases fail when the template is altered this way" test -s "$work/$name.problems"
+}
+
+behaviorMutant dateFailureIgnored '/could not compute/ { print "                  || true"; next } { print }'
+behaviorMutant dateFailureExitsOne '/could not compute/ { sub(/exit 2/, "exit 1") } { print }'
+behaviorMutant windowUnbounded '{ sub(/\{0,3\}/, "*") } { print }'
+behaviorMutant windowTooSmall '{ sub(/\{0,3\}/, "{0,2}") } { print }'
 
 # CALLER EXAMPLE
 cat > "$work/callerCheck.rb" <<'RUBY'
@@ -346,7 +386,7 @@ mode = trigger["workflow_dispatch"]["inputs"]["mode"]
 found << "dispatch" unless mode["type"] == "choice" && mode["options"] == ["base-moved", "recover"] && mode["default"] == "base-moved"
 found << "topPermissions" unless doc["permissions"] == {}
 job = doc["jobs"]["sweep"]
-found << "uses" unless job["uses"] == "NoNamedOrg-workflow/workflow-tests/.github/workflows/reusableRebaseSweep.yml@main"
+found << "uses" unless job["uses"] == "OWNER/CENTRAL-REPO/.github/workflows/reusable-rebase-sweep.yml@development"
 found << "with" unless job["with"] == {"mode" => "${{ inputs.mode || 'base-moved' }}"}
 found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
 puts found
@@ -354,6 +394,13 @@ RUBY
 ruby "$work/callerCheck.rb" "$caller" > "$work/caller.out" 2>&1
 check "T-RF21-f/caller-1 the example parses and calls the reusable with the right inputs and permissions" test ! -s "$work/caller.out"
 [ -s "$work/caller.out" ] && sed 's/^/    /' "$work/caller.out"
+
+check "T-RF21-f/caller-3 the example points at the published path, not at dist/" \
+    bash -c 'grep -E "^ +uses:" "$1" | grep -q -F "/.github/workflows/reusable-rebase-sweep.yml@development" && ! grep -E "^ +uses:" "$1" | grep -q "dist/"' _ "$caller"
+
+sed 's/reusable-rebase-sweep/reusableRebaseSweep/' "$caller" > "$work/callerPath.yml"
+ruby "$work/callerCheck.rb" "$work/callerPath.yml" > "$work/callerPath.out" 2>&1
+check "T-RF21-f/caller-4 the caller check fails when the uses path changes" test -s "$work/callerPath.out"
 
 sed 's/actions: write/actions: read/' "$caller" > "$work/callerMutant.yml"
 ruby "$work/callerCheck.rb" "$work/callerMutant.yml" > "$work/callerMutant.out" 2>&1

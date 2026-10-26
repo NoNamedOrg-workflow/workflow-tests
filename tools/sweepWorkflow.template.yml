@@ -26,6 +26,10 @@ permissions: {}
 jobs:
   sweep:
     runs-on: ubuntu-latest
+    # A newer push to the same base replaces the sweep still running, because the new one sees the newer base.
+    concurrency:
+      group: rebase-sweep-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: true
     # The sweep only replays runs: the label and the comment are written by the replayed check with its own token.
     permissions:
       actions: write
@@ -46,8 +50,9 @@ __RECHECK_SWEEP_SCRIPT__
           RECHECK_SWEEP_SCRIPT_EOF
           chmod +x "$RUNNER_TEMP/recheckSweep.sh"
           if [ "$MODE" = recover ]; then
-              [[ "$WINDOW_HOURS" =~ ^[1-9][0-9]*$ ]] || { echo "::error::windowHours must be a positive integer"; exit 2; }
-              SINCE=$(date -u -d "-${WINDOW_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ)
+              [[ "$WINDOW_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "::error::windowHours must be an integer from 1 to 9999"; exit 2; }
+              SINCE=$(date -u -d "-${WINDOW_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ) \
+                  || { echo "::error::could not compute the start of the window"; exit 2; }
               export SINCE
           fi
           "$RUNNER_TEMP/recheckSweep.sh"
