@@ -1,0 +1,28 @@
+# Example caller, copied into each repository. The default branch differs per repository (main, master, development):
+# change it in the push trigger below, since a push to it is what moves the base of the open pull requests.
+name: rebase-sweep
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: base-moved replays the green checks; recover replays the failed ones of the last 24 hours
+        type: choice
+        options: [base-moved, recover]
+        default: base-moved
+
+permissions: {}
+
+jobs:
+  sweep:
+    # A reusable workflow cannot hold more permissions than its caller grants it, so the job states them.
+    permissions:
+      actions: write
+      pull-requests: read
+    # The file generated in dist/ must be published at this path of the central repository. The @development ref follows
+    # the central branch on purpose (team decision, same as git-tree), so a fix there reaches every caller.
+    uses: OWNER/CENTRAL-REPO/.github/workflows/reusable-rebase-sweep.yml@development
+    with:
+      mode: ${{ inputs.mode || 'base-moved' }}
