@@ -41,6 +41,7 @@ case "$path" in
     */rerun)
         id=${path%/rerun}
         id=${id##*/}
+        [ -e "$STUB_FX/alreadyPost-$id" ] && { echo "gh: This workflow is already running (HTTP 403)" >&2; exit 1; }
         [ -e "$STUB_FX/failPost-$id" ] && fail
         ;;
     */actions/runs/*)
@@ -715,6 +716,46 @@ run WAIT_SECONDS=5 POLL_SECONDS=5
 expect "T-W10c one round reads once and never sleeps" 0
 [ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W10c read the run $(queries 10) time(s), wanted 1"; }
 [ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W10c slept"; }
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+touch "$fx/alreadyPost-10"
+run MAX_REPLAYS=1
+expect "T-A1 a rerun refused because the run is already running is benign and keeps the ceiling" 0
+has "notice" "::notice::#1 run 10 is already being replayed: skipped" "$output"
+lacks "no warning" "::warning::" "$output"
+has "the next run still gets the only attempt" "runs/20/rerun" "$calls"
+has "counts only the real replay" "replayed: 1" "$(echo "$output" | tail -n 1)"
+lacks "does not say replayed for the refused one" "#1: replayed" "$output"
+lacks "the raw gh message never shows" "This workflow is already running" "$output"
+lacks "no HTTP text either" "HTTP 403" "$output"
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+touch "$fx/failPost-10"
+run MAX_REPLAYS=1
+expect "T-A2 any other rerun failure still warns and consumes the ceiling" 0
+has "warning" "::warning::#1: could not replay run 10" "$output"
+lacks "no benign notice" "already being replayed" "$output"
+lacks "the ceiling stopped the next run" "runs/20/rerun" "$calls"
+has "limit warning" "::warning::limit of 1 reruns reached" "$output"
+lacks "the raw gh message never shows" "HTTP 500" "$output"
+
+reset
+pulls "$(pr 1 "$(sha 1)")"
+pendingPr 1
+runSeq 10 "$(runState 10 in_progress '')" "$(runState 10 completed success)"
+touch "$fx/alreadyPost-10"
+run WAIT_SECONDS=60 POLL_SECONDS=5
+expect "T-A3 a benign refusal in the second pass is a notice, not a warning" 0
+has "notice" "::notice::#1 run 10 is already being replayed: skipped" "$output"
+lacks "no warning" "::warning::" "$output"
+has "counts zero" "replayed: 0" "$(echo "$output" | tail -n 1)"
+lacks "the raw gh message never shows" "This workflow is already running" "$output"
 
 echo "recheckSweep: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
