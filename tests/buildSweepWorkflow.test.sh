@@ -63,13 +63,8 @@ def structureProblems(doc)
     found << "oneJob" unless jobs.keys == ["sweep"]
     job = hashOf(jobs["sweep"])
     found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
-    found << "concurrency" unless job["concurrency"] == {
-        "group" => "rebase-sweep-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.mode }}",
-        "cancel-in-progress" => false,
-    }
+    found << "concurrency" if job.key?("concurrency")
     found << "timeout" unless job["timeout-minutes"].is_a?(Integer) && job["timeout-minutes"] <= 10
-    groupExpressions = hashOf(job["concurrency"])["group"].to_s.scan(/\$\{\{ ([^}]*) \}\}/).flatten.sort
-    found << "concurrency" unless groupExpressions == ["github.ref_name", "github.repository", "inputs.mode"]
     expectedEnv = {
         "GH_TOKEN" => "${{ github.token }}",
         "REPO" => "${{ github.repository }}",
@@ -88,18 +83,11 @@ def textProblems(text)
     found = []
     lines = text.lines.map(&:chomp)
     allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath|waitSeconds)) \}\}\z/
-    group = /\A      group: rebase-sweep-\$\{\{ github\.repository \}\}-\$\{\{ github\.ref_name \}\}-\$\{\{ inputs\.mode \}\}\z/
     found << "uses" if lines.any? { |line| line =~ /\A\s*(- )?uses:/ }
     found << "eventData" if text =~ /github\.event|github\.head_ref/
     found << "secrets" if text =~ /secrets\./
-    found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed || line =~ group }
+    found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed }
     return found
-end
-
-if ARGV[0] == "groups"
-    group = doc["jobs"]["sweep"]["concurrency"]["group"]
-    puts group.gsub("${{ inputs.mode }}", ARGV[2])
-    exit 0
 end
 
 if runStep
@@ -166,8 +154,8 @@ check "T-RF21-d/shape-1 the committed workflow breaks no structure rule" test ! 
 check "T-RF21-d/shape-2 the workflow holds no uses: line" test "$(grep -c -E '^\s*(- )?uses:' "$dist")" -eq 0
 check "T-RF21-d/shape-3 no event data and no head_ref reach the file" \
     bash -c '! grep -q -E "github\.event|github\.head_ref" "$1"' _ "$dist"
-check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values and the concurrency group" \
-    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$" | grep -v -F -x "      group: rebase-sweep-\${{ github.repository }}-\${{ github.ref_name }}-\${{ inputs.mode }}"' _ "$dist"
+check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values" \
+    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$"' _ "$dist"
 check "T-RF21-d/shape-5 the script is indented at ten spaces and blank lines stay empty" \
     bash -c '! grep -q -E "^ +$" "$1"' _ "$dist"
 
@@ -193,25 +181,19 @@ expectMutation eventInRun eventData '{ print } /set -uo pipefail/ { print "     
 expectMutation eventInRunExpr expression '{ print } /set -uo pipefail/ { print "          echo \"${{ github.event.pull_request.title }}\"" }'
 expectMutation headRefInEnv eventData '{ sub(/github\.ref_name/, "github.head_ref"); print }'
 expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.mode }}\"" }'
-expectMutation noConcurrency concurrency '/^    concurrency:/ { skip = 2; next } skip > 0 { skip--; next } { print }'
-expectMutation cancelInProgress concurrency '{ sub(/cancel-in-progress: false/, "cancel-in-progress: true"); print }'
-expectMutation eventInGroup eventData '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
-expectMutation eventInGroupExpr expression '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
-expectMutation noModeInGroup concurrency '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "") } { print }'
-expectMutation workflowPathInGroup concurrency '{ sub(/inputs\.mode/, "inputs.workflowPath") } { print }'
-expectMutation windowHoursInGroup concurrency '{ sub(/\}\}$/, "}}-${{ inputs.windowHours }}") } { print }'
-expectMutation waitSecondsInGroup concurrency '{ sub(/\}\}$/, "}}-${{ inputs.waitSeconds }}") } { print }'
 expectMutation noTimeout timeout '/^    timeout-minutes:/ { next } { print }'
 expectMutation longTimeout timeout '{ sub(/timeout-minutes: 10/, "timeout-minutes: 60"); print }'
 expectMutation noWaitInput inputs '/^      waitSeconds:/ { skip = 3; next } skip > 0 { skip--; next } { print }'
 expectMutation wrongWaitDefault inputs '{ sub(/default: "120"/, "default: \"300\""); print }'
 expectMutation noWaitEnv env '/WAIT_SECONDS: / { next } { print }'
-expectMutation modeAndWorkflowPathInGroup expression '/^      group:/ { $0 = $0 "-${{ inputs.workflowPath }}" } { print }'
 expectMutation topConcurrency topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency: sweep" }'
+expectMutation topConcurrencyCancel topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency:"; print "  group: sweep"; print "  cancel-in-progress: true" }'
+expectMutation jobConcurrency concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency: sweep" }'
+expectMutation jobConcurrencyCancel concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency:"; print "      group: sweep"; print "      cancel-in-progress: true" }'
+expectMutation jobConcurrencyQueue concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency:"; print "      group: sweep"; print "      cancel-in-progress: false" }'
 expectMutation wrongDefault inputs '{ sub(/default: base-moved/, "default: recover"); print }'
 
-check "T-RF21-d/group-1 the base-moved and recover groups differ" \
-    test "$(ruby "$work/inspect.rb" groups "$dist" base-moved)" != "$(ruby "$work/inspect.rb" groups "$dist" recover)"
+check "T-RF21-d/concurrency-1 the generated file holds no concurrency at all" test "$(grep -c -i concurrency "$dist")" -eq 0
 
 # REFUSALS: exit 2, a message naming the cause and no output file at all (not even a partial one).
 refuse() {
