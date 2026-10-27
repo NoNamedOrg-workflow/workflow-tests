@@ -343,17 +343,17 @@ behaviorProblems() {
 
     local wait mode
     for mode in base-moved recover; do
-        for wait in 0 120 600; do
+        for wait in 0 120 300; do
             runStep "$1" "$mode" 6 "" "$wait"
             [ "$stepStatus" -eq 0 ] || echo "waitExit[$mode $wait]"
             echo "$stepOut" | grep -q -x "wait=$wait" || echo "waitPassed[$mode $wait]"
         done
     done
-    for wait in 601 1000 abc '' '1; touch x' -1 007 1.5; do
+    for wait in 301 600 1000 abc '' '1; touch x' -1 007 1.5; do
         runStep "$1" base-moved 24 "" "$wait"
         [ "$stepStatus" -eq 2 ] || echo "invalidWaitExit[$wait]"
         echo "$stepOut" | grep -q 'probe' && echo "invalidWaitRanScript[$wait]"
-        echo "$stepOut" | grep -q -F 'waitSeconds must be an integer from 0 to 600' || echo "invalidWaitMessage[$wait]"
+        echo "$stepOut" | grep -q -F 'waitSeconds must be an integer from 0 to 300' || echo "invalidWaitMessage[$wait]"
         [ ! -e "$work/scene/x" ] || echo "invalidWaitInjected[$wait]"
     done
     return 0
@@ -391,7 +391,7 @@ behaviorMutant() {
 behaviorMutant dateFailureIgnored '/could not compute/ { print "                  || true"; next } { print }'
 behaviorMutant dateFailureExitsOne '/could not compute/ { sub(/exit 2/, "exit 1") } { print }'
 behaviorMutant noWaitValidation '/waitSeconds must be/ { next } { print }'
-behaviorMutant waitUnbounded '{ sub(/-le 600/, "-le 6000") } { print }'
+behaviorMutant waitUnbounded '{ sub(/-le 300/, "-le 3000") } { print }'
 behaviorMutant waitFailureExitsOne '/waitSeconds must be/ { sub(/exit 2/, "exit 1") } { print }'
 behaviorMutant waitRegexLoose '/waitSeconds must be/ { next } { sub(/\^\(0\|\[1-9\]\[0-9\]\{0,2\}\)\$/, ".*") } { print }'
 behaviorMutant windowUnbounded '{ sub(/\{0,3\}/, "*") } { print }'
