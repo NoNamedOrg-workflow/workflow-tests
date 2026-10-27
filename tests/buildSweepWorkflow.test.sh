@@ -51,7 +51,7 @@ def structureProblems(doc)
     found = []
     trigger = hashOf(doc["on"] || doc[true])
     inputs = hashOf(hashOf(trigger["workflow_call"])["inputs"])
-    wanted = {"mode" => "base-moved", "windowHours" => "24", "workflowPath" => ".github/workflows/enforceRebase.yml"}
+    wanted = {"mode" => "base-moved", "windowHours" => "24", "workflowPath" => ".github/workflows/enforceRebase.yml", "waitSeconds" => "120"}
     found << "inputs" unless inputs.keys.sort == wanted.keys.sort
     found << "inputs" unless wanted.all? { |key, value| hashOf(inputs[key])["default"] == value }
     found << "inputs" unless inputs.values.all? { |input| hashOf(input)["type"] == "string" }
@@ -63,12 +63,8 @@ def structureProblems(doc)
     found << "oneJob" unless jobs.keys == ["sweep"]
     job = hashOf(jobs["sweep"])
     found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
-    found << "concurrency" unless job["concurrency"] == {
-        "group" => "rebase-sweep-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.mode }}",
-        "cancel-in-progress" => true,
-    }
-    groupExpressions = hashOf(job["concurrency"])["group"].to_s.scan(/\$\{\{ ([^}]*) \}\}/).flatten.sort
-    found << "concurrency" unless groupExpressions == ["github.ref_name", "github.repository", "inputs.mode"]
+    found << "concurrency" if job.key?("concurrency")
+    found << "timeout" unless job["timeout-minutes"].is_a?(Integer) && job["timeout-minutes"] <= 10
     expectedEnv = {
         "GH_TOKEN" => "${{ github.token }}",
         "REPO" => "${{ github.repository }}",
@@ -76,6 +72,7 @@ def structureProblems(doc)
         "MODE" => "${{ inputs.mode }}",
         "WINDOW_HOURS" => "${{ inputs.windowHours }}",
         "WORKFLOW_PATH" => "${{ inputs.workflowPath }}",
+        "WAIT_SECONDS" => "${{ inputs.waitSeconds }}",
     }
     found << "env" unless job["env"] == expectedEnv
     found << "steps" unless job["steps"].is_a?(Array) && job["steps"].length == 1
@@ -85,19 +82,12 @@ end
 def textProblems(text)
     found = []
     lines = text.lines.map(&:chomp)
-    allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath)) \}\}\z/
-    group = /\A      group: rebase-sweep-\$\{\{ github\.repository \}\}-\$\{\{ github\.ref_name \}\}-\$\{\{ inputs\.mode \}\}\z/
+    allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath|waitSeconds)) \}\}\z/
     found << "uses" if lines.any? { |line| line =~ /\A\s*(- )?uses:/ }
     found << "eventData" if text =~ /github\.event|github\.head_ref/
     found << "secrets" if text =~ /secrets\./
-    found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed || line =~ group }
+    found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed }
     return found
-end
-
-if ARGV[0] == "groups"
-    group = doc["jobs"]["sweep"]["concurrency"]["group"]
-    puts group.gsub("${{ inputs.mode }}", ARGV[2])
-    exit 0
 end
 
 if runStep
@@ -164,8 +154,8 @@ check "T-RF21-d/shape-1 the committed workflow breaks no structure rule" test ! 
 check "T-RF21-d/shape-2 the workflow holds no uses: line" test "$(grep -c -E '^\s*(- )?uses:' "$dist")" -eq 0
 check "T-RF21-d/shape-3 no event data and no head_ref reach the file" \
     bash -c '! grep -q -E "github\.event|github\.head_ref" "$1"' _ "$dist"
-check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values and the concurrency group" \
-    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$" | grep -v -F -x "      group: rebase-sweep-\${{ github.repository }}-\${{ github.ref_name }}-\${{ inputs.mode }}"' _ "$dist"
+check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values" \
+    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$"' _ "$dist"
 check "T-RF21-d/shape-5 the script is indented at ten spaces and blank lines stay empty" \
     bash -c '! grep -q -E "^ +$" "$1"' _ "$dist"
 
@@ -191,19 +181,19 @@ expectMutation eventInRun eventData '{ print } /set -uo pipefail/ { print "     
 expectMutation eventInRunExpr expression '{ print } /set -uo pipefail/ { print "          echo \"${{ github.event.pull_request.title }}\"" }'
 expectMutation headRefInEnv eventData '{ sub(/github\.ref_name/, "github.head_ref"); print }'
 expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.mode }}\"" }'
-expectMutation noConcurrency concurrency '/^    concurrency:/ { skip = 2; next } skip > 0 { skip--; next } { print }'
-expectMutation noCancel concurrency '{ sub(/cancel-in-progress: true/, "cancel-in-progress: false"); print }'
-expectMutation eventInGroup eventData '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
-expectMutation eventInGroupExpr expression '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
-expectMutation noModeInGroup concurrency '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "") } { print }'
-expectMutation workflowPathInGroup concurrency '{ sub(/inputs\.mode/, "inputs.workflowPath") } { print }'
-expectMutation windowHoursInGroup concurrency '{ sub(/\}\}$/, "}}-${{ inputs.windowHours }}") } { print }'
-expectMutation modeAndWorkflowPathInGroup expression '/^      group:/ { $0 = $0 "-${{ inputs.workflowPath }}" } { print }'
+expectMutation noTimeout timeout '/^    timeout-minutes:/ { next } { print }'
+expectMutation longTimeout timeout '{ sub(/timeout-minutes: 10/, "timeout-minutes: 60"); print }'
+expectMutation noWaitInput inputs '/^      waitSeconds:/ { skip = 3; next } skip > 0 { skip--; next } { print }'
+expectMutation wrongWaitDefault inputs '{ sub(/default: "120"/, "default: \"300\""); print }'
+expectMutation noWaitEnv env '/WAIT_SECONDS: / { next } { print }'
 expectMutation topConcurrency topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency: sweep" }'
+expectMutation topConcurrencyCancel topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency:"; print "  group: sweep"; print "  cancel-in-progress: true" }'
+expectMutation jobConcurrency concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency: sweep" }'
+expectMutation jobConcurrencyCancel concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency:"; print "      group: sweep"; print "      cancel-in-progress: true" }'
+expectMutation jobConcurrencyQueue concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency:"; print "      group: sweep"; print "      cancel-in-progress: false" }'
 expectMutation wrongDefault inputs '{ sub(/default: base-moved/, "default: recover"); print }'
 
-check "T-RF21-d/group-1 the base-moved and recover groups differ" \
-    test "$(ruby "$work/inspect.rb" groups "$dist" base-moved)" != "$(ruby "$work/inspect.rb" groups "$dist" recover)"
+check "T-RF21-d/concurrency-1 the generated file holds no concurrency at all" test "$(grep -c -i concurrency "$dist")" -eq 0
 
 # REFUSALS: exit 2, a message naming the cause and no output file at all (not even a partial one).
 refuse() {
@@ -293,7 +283,7 @@ check "T-RF21-c/out-4 the builder is bash 3.2 compatible (no bash 4 features)" \
 mkdir -p "$work/fakeBin"
 cat > "$work/fakeBin/chmod" <<'FAKE'
 #!/usr/bin/env bash
-printf '#!/usr/bin/env bash\necho "probe SINCE=${SINCE-unset} MODE=$MODE"\n' > "$2"
+printf '#!/usr/bin/env bash\necho "probe SINCE=${SINCE-unset} MODE=$MODE"\necho "wait=${WAIT_SECONDS-unset}"\n' > "$2"
 exec /bin/chmod "$@"
 FAKE
 cat > "$work/fakeBin/date" <<'FAKE'
@@ -309,14 +299,14 @@ cp "$work/fakeBin/chmod" "$work/brokenDateBin/chmod"
 printf '#!/usr/bin/env bash\necho "date: invalid option" >&2\nexit 1\n' > "$work/brokenDateBin/date"
 chmod +x "$work/brokenDateBin/chmod" "$work/brokenDateBin/date"
 
-# runStep YAML MODE WINDOW_HOURS [BINDIR]: leaves the output in $stepOut and the exit code in $stepStatus.
+# runStep YAML MODE WINDOW_HOURS [BINDIR] [WAIT_SECONDS]: leaves the output in $stepOut and the exit code in $stepStatus.
 runStep() {
     local body="$work/step.sh"
     runBody "$1" > "$body"
     rm -rf "$work/scene"
     mkdir -p "$work/scene/tmp"
     : > "$work/date.log"
-    stepOut=$(cd "$work/scene" && env PATH="${4:-$work/fakeBin}:$PATH" MODE="$2" WINDOW_HOURS="$3" RUNNER_TEMP="$work/scene/tmp" \
+    stepOut=$(cd "$work/scene" && env PATH="${4:-$work/fakeBin}:$PATH" MODE="$2" WINDOW_HOURS="$3" WAIT_SECONDS="${5-120}" RUNNER_TEMP="$work/scene/tmp" \
         FAKE_DATE_LOG="$work/date.log" "$bashBin" -e "$body" 2>&1 < /dev/null)
     stepStatus=$?
 }
@@ -349,6 +339,22 @@ behaviorProblems() {
         echo "$stepOut" | grep -q 'probe' && echo "invalidRanScript[$bad]"
         echo "$stepOut" | grep -q -F 'windowHours must be an integer from 1 to 9999' || echo "invalidMessage[$bad]"
         [ ! -e "$work/scene/x" ] || echo "invalidInjected[$bad]"
+    done
+
+    local wait mode
+    for mode in base-moved recover; do
+        for wait in 0 120 300; do
+            runStep "$1" "$mode" 6 "" "$wait"
+            [ "$stepStatus" -eq 0 ] || echo "waitExit[$mode $wait]"
+            echo "$stepOut" | grep -q -x "wait=$wait" || echo "waitPassed[$mode $wait]"
+        done
+    done
+    for wait in 301 600 1000 abc '' '1; touch x' -1 007 1.5; do
+        runStep "$1" base-moved 24 "" "$wait"
+        [ "$stepStatus" -eq 2 ] || echo "invalidWaitExit[$wait]"
+        echo "$stepOut" | grep -q 'probe' && echo "invalidWaitRanScript[$wait]"
+        echo "$stepOut" | grep -q -F 'waitSeconds must be an integer from 0 to 300' || echo "invalidWaitMessage[$wait]"
+        [ ! -e "$work/scene/x" ] || echo "invalidWaitInjected[$wait]"
     done
     return 0
 }
@@ -384,6 +390,10 @@ behaviorMutant() {
 
 behaviorMutant dateFailureIgnored '/could not compute/ { print "                  || true"; next } { print }'
 behaviorMutant dateFailureExitsOne '/could not compute/ { sub(/exit 2/, "exit 1") } { print }'
+behaviorMutant noWaitValidation '/waitSeconds must be/ { next } { print }'
+behaviorMutant waitUnbounded '{ sub(/-le 300/, "-le 3000") } { print }'
+behaviorMutant waitFailureExitsOne '/waitSeconds must be/ { sub(/exit 2/, "exit 1") } { print }'
+behaviorMutant waitRegexLoose '/waitSeconds must be/ { next } { sub(/\^\(0\|\[1-9\]\[0-9\]\{0,2\}\)\$/, ".*") } { print }'
 behaviorMutant windowUnbounded '{ sub(/\{0,3\}/, "*") } { print }'
 behaviorMutant windowTooSmall '{ sub(/\{0,3\}/, "{0,2}") } { print }'
 

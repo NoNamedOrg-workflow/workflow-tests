@@ -6,8 +6,12 @@ workflowPath=${WORKFLOW_PATH:-.github/workflows/enforceRebase.yml}
 mode=${MODE:-base-moved}
 since=${SINCE:-}
 maxReplays=${MAX_REPLAYS:-50}
+waitSeconds=${WAIT_SECONDS-120}
+pollSeconds=${POLL_SECONDS-5}
 replayed=0
 attempts=0
+# Lines of "number id" for the runs that were in progress when listed and may still be reading an older base.
+pending=
 
 # The sweep runs on every push to the default branch, so a bad setting is the only thing allowed to fail it.
 abort() {
@@ -25,6 +29,10 @@ validateConfig() {
     [ -n "${BASE:-}" ] || abort "BASE is required"
     [ "$mode" = base-moved ] || [ "$mode" = recover ] || abort "MODE must be base-moved or recover"
     [[ "$maxReplays" =~ ^[1-9][0-9]*$ ]] || abort "MAX_REPLAYS must be a positive integer"
+    [[ "$waitSeconds" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$waitSeconds" -le 300 ] \
+        || abort "WAIT_SECONDS must be an integer from 0 to 300"
+    [[ "$pollSeconds" =~ ^[1-9][0-9]?$ ]] && [ "$pollSeconds" -le 60 ] \
+        || abort "POLL_SECONDS must be an integer from 1 to 60"
     [ "$mode" = recover ] || return 0
     [[ "$since" =~ $timestampPattern ]] || abort "SINCE must be YYYY-MM-DDTHH:MM:SSZ in recover mode"
 }
@@ -73,8 +81,20 @@ selectRecover() {
     return 1
 }
 
+# A run in progress may have read the base before the push that started this sweep, so it is awaited, not skipped.
+# A queued run reads the live base when it starts, after that push, so it never goes stale.
+shouldWait() {
+    local id=$1 status=$2
+    [ "$mode" = base-moved ] && [ "$status" = in_progress ] && [ "$waitSeconds" -gt 0 ] && [[ "$id" =~ ^[0-9]+$ ]]
+}
+
 shouldReplay() {
     local number=$1 id=$2 status=$3 updated=$4 conclusion=$5
+    if shouldWait "$id" "$status"; then
+        echo "::notice::#$number run $id is in progress: waiting for it to finish"
+        pending="$pending$number $id"$'\n'
+        return 1
+    fi
     if [ "$status" != completed ]; then
         echo "::notice::#$number run $id is $status: skipped"
         return 1
@@ -85,7 +105,7 @@ shouldReplay() {
 
 # Returns 3 when the ceiling is reached so the caller stops the whole sweep.
 replay() {
-    local number=$1 id=$2
+    local number=$1 id=$2 failure
     if [ "$attempts" -ge "$maxReplays" ]; then
         echo "::warning::limit of $maxReplays reruns reached"
         return 3
@@ -95,12 +115,79 @@ replay() {
         return 0
     fi
     attempts=$((attempts + 1))
-    if ! gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
+    # Sweeps of two pushes run side by side: GitHub refuses a rerun of a run already rerunning, which is no failure.
+    # The stderr is only matched, never printed.
+    if ! failure=$(gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent 2>&1); then
+        if [[ "$failure" == *"already running"* ]]; then
+            attempts=$((attempts - 1))
+            echo "::notice::#$number run $id is already being replayed: skipped"
+            return 0
+        fi
         echo "::warning::#$number: could not replay run $id"
         return 0
     fi
     echo "#$number: replayed run $id"
     replayed=$((replayed + 1))
+}
+
+readRunState() {
+    local raw
+    raw=$(gh api -X GET "repos/$REPO/actions/runs/$1") || return 1
+    echo "$raw" | jq -er 'select(type == "object" and (.status | type) == "string") | [.status, (.conclusion // "none")] | @tsv'
+}
+
+# One listing of the runs in progress answers for every pending run, so a round costs one call, not one per run.
+listInProgress() {
+    gh api -X GET "repos/$REPO/actions/runs" -f status=in_progress -f per_page=100 \
+        | jq -er '[.workflow_runs[].id | tostring] | join(" ")'
+}
+
+# One round over the pending runs; keeps in pending only those still running. Only a run missing from the listing is
+# read on its own, since the listing is paged and may lag. Returns 3 when the ceiling is reached.
+pollPending() {
+    local remaining="" number id state status conclusion code running
+    if ! running=$(listInProgress); then
+        echo "::notice::could not list the runs in progress: reading each pending run"
+        running=
+    fi
+    while read -r number id; do
+        [ -n "$id" ] || continue
+        if [[ " $running " == *" $id "* ]]; then
+            remaining="$remaining$number $id"$'\n'
+            continue
+        fi
+        if ! state=$(readRunState "$id"); then
+            echo "::warning::#$number: could not read run $id"
+            continue
+        fi
+        read -r status conclusion <<< "$state"
+        if [ "$status" != completed ]; then
+            remaining="$remaining$number $id"$'\n'
+            continue
+        fi
+        if [ "$conclusion" != success ]; then
+            echo "#$number run $id finished $conclusion: nothing to change"
+            continue
+        fi
+        replay "$number" "$id"
+        code=$?
+        [ "$code" -ne 3 ] || return 3
+    done <<< "$pending"
+    pending=$remaining
+}
+
+# The rounds are counted so a fake sleep makes the wait deterministic; the clock still bounds the time spent in the
+# calls themselves, which the rounds alone do not.
+waitPending() {
+    local rounds=$((waitSeconds / pollSeconds)) round=0 started=$SECONDS left
+    while [ "$round" -lt "$rounds" ] && [ -n "$pending" ] && [ $((SECONDS - started)) -lt "$waitSeconds" ]; do
+        [ "$round" -eq 0 ] || sleep "$pollSeconds"
+        round=$((round + 1))
+        pollPending || return 0
+    done
+    [ -n "$pending" ] || return 0
+    left=$(printf '%s' "$pending" | grep -c .)
+    echo "::warning::$left run(s) still in progress after ${waitSeconds}s: not replayed"
 }
 
 replayPull() {
@@ -130,8 +217,9 @@ main() {
     [ "$total" -lt 100 ] || echo "::notice::100 open pull requests: the rest is not re-evaluated"
     while IFS=$'\t' read -r number sha; do
         [ -n "$number" ] || continue
-        replayPull "$number" "$sha" || break
+        replayPull "$number" "$sha" || return 0
     done <<< "$prs"
+    waitPending
 }
 
 main

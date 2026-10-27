@@ -20,16 +20,19 @@ on:
         description: Path of the rebase check workflow whose latest run is replayed
         type: string
         default: .github/workflows/enforceRebase.yml
+      waitSeconds:
+        description: Seconds that base-moved mode waits for the runs in progress before giving up, from 0 to 300
+        type: string
+        default: "120"
 
 permissions: {}
 
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # A newer push to the same base replaces the sweep still running, because the new one sees the newer base.
-    concurrency:
-      group: rebase-sweep-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.mode }}
-      cancel-in-progress: true
+    # Sweeps of different pushes run side by side: GitHub refuses a rerun of a run already rerunning and the script
+    # treats that refusal as benign.
+    timeout-minutes: 10
     # The sweep only replays runs: the label and the comment are written by the replayed check with its own token.
     permissions:
       actions: write
@@ -41,6 +44,7 @@ jobs:
       MODE: ${{ inputs.mode }}
       WINDOW_HOURS: ${{ inputs.windowHours }}
       WORKFLOW_PATH: ${{ inputs.workflowPath }}
+      WAIT_SECONDS: ${{ inputs.waitSeconds }}
     steps:
       - name: Replay the check of the open pull requests
         run: |
@@ -49,6 +53,8 @@ jobs:
 __RECHECK_SWEEP_SCRIPT__
           RECHECK_SWEEP_SCRIPT_EOF
           chmod +x "$RUNNER_TEMP/recheckSweep.sh"
+          [[ "$WAIT_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$WAIT_SECONDS" -le 300 ] \
+              || { echo "::error::waitSeconds must be an integer from 0 to 300"; exit 2; }
           if [ "$MODE" = recover ]; then
               [[ "$WINDOW_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "::error::windowHours must be an integer from 1 to 9999"; exit 2; }
               SINCE=$(date -u -d "-${WINDOW_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ) \
