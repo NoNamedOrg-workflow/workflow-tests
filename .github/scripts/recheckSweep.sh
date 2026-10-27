@@ -105,7 +105,7 @@ shouldReplay() {
 
 # Returns 3 when the ceiling is reached so the caller stops the whole sweep.
 replay() {
-    local number=$1 id=$2
+    local number=$1 id=$2 failure
     if [ "$attempts" -ge "$maxReplays" ]; then
         echo "::warning::limit of $maxReplays reruns reached"
         return 3
@@ -115,7 +115,14 @@ replay() {
         return 0
     fi
     attempts=$((attempts + 1))
-    if ! gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent; then
+    # Sweeps of two pushes run side by side: GitHub refuses a rerun of a run already rerunning, which is no failure.
+    # The stderr is only matched, never printed.
+    if ! failure=$(gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent 2>&1); then
+        if [[ "$failure" == *"already running"* ]]; then
+            attempts=$((attempts - 1))
+            echo "::notice::#$number run $id is already being replayed: skipped"
+            return 0
+        fi
         echo "::warning::#$number: could not replay run $id"
         return 0
     fi
