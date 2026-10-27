@@ -562,7 +562,7 @@ pendingPr() {
 }
 
 queries() {
-    echo "$calls" | grep -c -F -- "-X GET repos/o/r/actions/runs/$1"
+    echo "$calls" | grep -c -x -F -- "api -X GET repos/o/r/actions/runs/$1"
 }
 
 lists() {
