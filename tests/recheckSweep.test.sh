@@ -449,7 +449,7 @@ expect "T-S23 a JSON null update time is not replayed in recover" 0
 lacks "no rerun" "/rerun" "$calls"
 has "says why" "::notice::#1 run 10 has no valid update time: skipped" "$output"
 
-for badTime in null yesterday 2026-03-02 2026-03-02T00:00:00z "2026-03-02 00:00:00Z" 2026-03-02T00:00:00Z.5 ''; do
+for badTime in null yesterday 2026-03-02 2026-03-02T00:00:00z "2026-03-02 00:00:00Z" 2026-03-02T00:00:00Z.5 x2026-03-02T00:00:00Z 2026-03-02T00:00:00Zx ''; do
     reset
     pulls "$(pr 1 "$(sha 1)")"
     runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure "$badTime")"
@@ -477,6 +477,28 @@ countIs "two malformed warnings" "::warning::skipped a pull request with a malfo
 lacks "41 character sha not replayed" "runs/10/rerun" "$calls"
 lacks "uppercase sha not replayed" "runs/20/rerun" "$calls"
 has "the valid one is replayed" "runs/30/rerun" "$calls"
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z | jq -c '.id = "abc"')"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+run MAX_REPLAYS=1
+expect "T-S25 a run with a non numeric id does not consume the attempt ceiling" 0
+has "the non numeric id is skipped" "::warning::#1: run id is not numeric: skipped" "$output"
+has "the valid run is replayed" "runs/20/rerun" "$calls"
+lacks "no limit warning" "limit of" "$output"
+
+reset
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-01T00:00:00Z completed failure 2026-03-01T00:00:00Z)"
+runsFor "$(sha 2)" "$(mkRun 20 1 2026-02-28T23:59:59Z completed failure 2026-02-28T23:59:59Z)"
+runsFor "$(sha 3)" "$(mkRun 30 1 2026-03-01T00:00:01Z completed failure 2026-03-01T00:00:01Z)"
+run MODE=recover SINCE=2026-03-01T00:00:00Z
+expect "T-S26 recover includes a run updated exactly at SINCE and skips one a second before" 0
+has "the run at SINCE is replayed" "runs/10/rerun" "$calls"
+lacks "the run a second before is not replayed" "runs/20/rerun" "$calls"
+has "the run a second before says why" "#2 run 20 older than 2026-03-01T00:00:00Z: skipped" "$output"
+has "the run after SINCE is replayed" "runs/30/rerun" "$calls"
 
 echo "recheckSweep: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
