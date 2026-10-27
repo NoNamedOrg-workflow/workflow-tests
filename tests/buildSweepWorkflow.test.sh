@@ -51,7 +51,7 @@ def structureProblems(doc)
     found = []
     trigger = hashOf(doc["on"] || doc[true])
     inputs = hashOf(hashOf(trigger["workflow_call"])["inputs"])
-    wanted = {"mode" => "base-moved", "windowHours" => "24", "workflowPath" => ".github/workflows/enforceRebase.yml"}
+    wanted = {"mode" => "base-moved", "windowHours" => "24", "workflowPath" => ".github/workflows/enforceRebase.yml", "waitSeconds" => "120"}
     found << "inputs" unless inputs.keys.sort == wanted.keys.sort
     found << "inputs" unless wanted.all? { |key, value| hashOf(inputs[key])["default"] == value }
     found << "inputs" unless inputs.values.all? { |input| hashOf(input)["type"] == "string" }
@@ -65,8 +65,9 @@ def structureProblems(doc)
     found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
     found << "concurrency" unless job["concurrency"] == {
         "group" => "rebase-sweep-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.mode }}",
-        "cancel-in-progress" => true,
+        "cancel-in-progress" => false,
     }
+    found << "timeout" unless job["timeout-minutes"].is_a?(Integer) && job["timeout-minutes"] <= 10
     groupExpressions = hashOf(job["concurrency"])["group"].to_s.scan(/\$\{\{ ([^}]*) \}\}/).flatten.sort
     found << "concurrency" unless groupExpressions == ["github.ref_name", "github.repository", "inputs.mode"]
     expectedEnv = {
@@ -76,6 +77,7 @@ def structureProblems(doc)
         "MODE" => "${{ inputs.mode }}",
         "WINDOW_HOURS" => "${{ inputs.windowHours }}",
         "WORKFLOW_PATH" => "${{ inputs.workflowPath }}",
+        "WAIT_SECONDS" => "${{ inputs.waitSeconds }}",
     }
     found << "env" unless job["env"] == expectedEnv
     found << "steps" unless job["steps"].is_a?(Array) && job["steps"].length == 1
@@ -85,7 +87,7 @@ end
 def textProblems(text)
     found = []
     lines = text.lines.map(&:chomp)
-    allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath)) \}\}\z/
+    allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath|waitSeconds)) \}\}\z/
     group = /\A      group: rebase-sweep-\$\{\{ github\.repository \}\}-\$\{\{ github\.ref_name \}\}-\$\{\{ inputs\.mode \}\}\z/
     found << "uses" if lines.any? { |line| line =~ /\A\s*(- )?uses:/ }
     found << "eventData" if text =~ /github\.event|github\.head_ref/
@@ -192,12 +194,18 @@ expectMutation eventInRunExpr expression '{ print } /set -uo pipefail/ { print "
 expectMutation headRefInEnv eventData '{ sub(/github\.ref_name/, "github.head_ref"); print }'
 expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.mode }}\"" }'
 expectMutation noConcurrency concurrency '/^    concurrency:/ { skip = 2; next } skip > 0 { skip--; next } { print }'
-expectMutation noCancel concurrency '{ sub(/cancel-in-progress: true/, "cancel-in-progress: false"); print }'
+expectMutation cancelInProgress concurrency '{ sub(/cancel-in-progress: false/, "cancel-in-progress: true"); print }'
 expectMutation eventInGroup eventData '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
 expectMutation eventInGroupExpr expression '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
 expectMutation noModeInGroup concurrency '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "") } { print }'
 expectMutation workflowPathInGroup concurrency '{ sub(/inputs\.mode/, "inputs.workflowPath") } { print }'
 expectMutation windowHoursInGroup concurrency '{ sub(/\}\}$/, "}}-${{ inputs.windowHours }}") } { print }'
+expectMutation waitSecondsInGroup concurrency '{ sub(/\}\}$/, "}}-${{ inputs.waitSeconds }}") } { print }'
+expectMutation noTimeout timeout '/^    timeout-minutes:/ { next } { print }'
+expectMutation longTimeout timeout '{ sub(/timeout-minutes: 10/, "timeout-minutes: 60"); print }'
+expectMutation noWaitInput inputs '/^      waitSeconds:/ { skip = 3; next } skip > 0 { skip--; next } { print }'
+expectMutation wrongWaitDefault inputs '{ sub(/default: "120"/, "default: \"300\""); print }'
+expectMutation noWaitEnv env '/WAIT_SECONDS: / { next } { print }'
 expectMutation modeAndWorkflowPathInGroup expression '/^      group:/ { $0 = $0 "-${{ inputs.workflowPath }}" } { print }'
 expectMutation topConcurrency topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency: sweep" }'
 expectMutation wrongDefault inputs '{ sub(/default: base-moved/, "default: recover"); print }'
@@ -293,7 +301,7 @@ check "T-RF21-c/out-4 the builder is bash 3.2 compatible (no bash 4 features)" \
 mkdir -p "$work/fakeBin"
 cat > "$work/fakeBin/chmod" <<'FAKE'
 #!/usr/bin/env bash
-printf '#!/usr/bin/env bash\necho "probe SINCE=${SINCE-unset} MODE=$MODE"\n' > "$2"
+printf '#!/usr/bin/env bash\necho "probe SINCE=${SINCE-unset} MODE=$MODE"\necho "wait=${WAIT_SECONDS-unset}"\n' > "$2"
 exec /bin/chmod "$@"
 FAKE
 cat > "$work/fakeBin/date" <<'FAKE'
@@ -309,14 +317,14 @@ cp "$work/fakeBin/chmod" "$work/brokenDateBin/chmod"
 printf '#!/usr/bin/env bash\necho "date: invalid option" >&2\nexit 1\n' > "$work/brokenDateBin/date"
 chmod +x "$work/brokenDateBin/chmod" "$work/brokenDateBin/date"
 
-# runStep YAML MODE WINDOW_HOURS [BINDIR]: leaves the output in $stepOut and the exit code in $stepStatus.
+# runStep YAML MODE WINDOW_HOURS [BINDIR] [WAIT_SECONDS]: leaves the output in $stepOut and the exit code in $stepStatus.
 runStep() {
     local body="$work/step.sh"
     runBody "$1" > "$body"
     rm -rf "$work/scene"
     mkdir -p "$work/scene/tmp"
     : > "$work/date.log"
-    stepOut=$(cd "$work/scene" && env PATH="${4:-$work/fakeBin}:$PATH" MODE="$2" WINDOW_HOURS="$3" RUNNER_TEMP="$work/scene/tmp" \
+    stepOut=$(cd "$work/scene" && env PATH="${4:-$work/fakeBin}:$PATH" MODE="$2" WINDOW_HOURS="$3" WAIT_SECONDS="${5-120}" RUNNER_TEMP="$work/scene/tmp" \
         FAKE_DATE_LOG="$work/date.log" "$bashBin" -e "$body" 2>&1 < /dev/null)
     stepStatus=$?
 }
@@ -349,6 +357,22 @@ behaviorProblems() {
         echo "$stepOut" | grep -q 'probe' && echo "invalidRanScript[$bad]"
         echo "$stepOut" | grep -q -F 'windowHours must be an integer from 1 to 9999' || echo "invalidMessage[$bad]"
         [ ! -e "$work/scene/x" ] || echo "invalidInjected[$bad]"
+    done
+
+    local wait mode
+    for mode in base-moved recover; do
+        for wait in 0 120 600; do
+            runStep "$1" "$mode" 6 "" "$wait"
+            [ "$stepStatus" -eq 0 ] || echo "waitExit[$mode $wait]"
+            echo "$stepOut" | grep -q -x "wait=$wait" || echo "waitPassed[$mode $wait]"
+        done
+    done
+    for wait in 601 1000 abc '' '1; touch x' -1 007 1.5; do
+        runStep "$1" base-moved 24 "" "$wait"
+        [ "$stepStatus" -eq 2 ] || echo "invalidWaitExit[$wait]"
+        echo "$stepOut" | grep -q 'probe' && echo "invalidWaitRanScript[$wait]"
+        echo "$stepOut" | grep -q -F 'waitSeconds must be an integer from 0 to 600' || echo "invalidWaitMessage[$wait]"
+        [ ! -e "$work/scene/x" ] || echo "invalidWaitInjected[$wait]"
     done
     return 0
 }
@@ -384,6 +408,10 @@ behaviorMutant() {
 
 behaviorMutant dateFailureIgnored '/could not compute/ { print "                  || true"; next } { print }'
 behaviorMutant dateFailureExitsOne '/could not compute/ { sub(/exit 2/, "exit 1") } { print }'
+behaviorMutant noWaitValidation '/waitSeconds must be/ { next } { print }'
+behaviorMutant waitUnbounded '{ sub(/-le 600/, "-le 6000") } { print }'
+behaviorMutant waitFailureExitsOne '/waitSeconds must be/ { sub(/exit 2/, "exit 1") } { print }'
+behaviorMutant waitRegexLoose '/waitSeconds must be/ { next } { sub(/\^\(0\|\[1-9\]\[0-9\]\{0,2\}\)\$/, ".*") } { print }'
 behaviorMutant windowUnbounded '{ sub(/\{0,3\}/, "*") } { print }'
 behaviorMutant windowTooSmall '{ sub(/\{0,3\}/, "{0,2}") } { print }'
 
