@@ -21,7 +21,7 @@ on:
         type: string
         default: .github/workflows/enforceRebase.yml
       waitSeconds:
-        description: Seconds that base-moved mode waits for the runs in progress before giving up, from 0 to 600
+        description: Seconds that base-moved mode waits for the runs in progress before giving up, from 0 to 300
         type: string
         default: "120"
 
@@ -81,8 +81,8 @@ jobs:
               [ -n "${BASE:-}" ] || abort "BASE is required"
               [ "$mode" = base-moved ] || [ "$mode" = recover ] || abort "MODE must be base-moved or recover"
               [[ "$maxReplays" =~ ^[1-9][0-9]*$ ]] || abort "MAX_REPLAYS must be a positive integer"
-              [[ "$waitSeconds" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$waitSeconds" -le 600 ] \
-                  || abort "WAIT_SECONDS must be an integer from 0 to 600"
+              [[ "$waitSeconds" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$waitSeconds" -le 300 ] \
+                  || abort "WAIT_SECONDS must be an integer from 0 to 300"
               [[ "$pollSeconds" =~ ^[1-9][0-9]?$ ]] && [ "$pollSeconds" -le 60 ] \
                   || abort "POLL_SECONDS must be an integer from 1 to 60"
               [ "$mode" = recover ] || return 0
@@ -188,11 +188,26 @@ jobs:
               echo "$raw" | jq -er 'select(type == "object" and (.status | type) == "string") | [.status, (.conclusion // "none")] | @tsv'
           }
 
-          # One round over the pending runs; keeps in pending only those still running. Returns 3 when the ceiling is reached.
+          # One listing of the runs in progress answers for every pending run, so a round costs one call, not one per run.
+          listInProgress() {
+              gh api -X GET "repos/$REPO/actions/runs" -f status=in_progress -f per_page=100 \
+                  | jq -er '[.workflow_runs[].id | tostring] | join(" ")'
+          }
+
+          # One round over the pending runs; keeps in pending only those still running. Only a run missing from the listing is
+          # read on its own, since the listing is paged and may lag. Returns 3 when the ceiling is reached.
           pollPending() {
-              local remaining="" number id state status conclusion code
+              local remaining="" number id state status conclusion code running
+              if ! running=$(listInProgress); then
+                  echo "::notice::could not list the runs in progress: reading each pending run"
+                  running=
+              fi
               while read -r number id; do
                   [ -n "$id" ] || continue
+                  if [[ " $running " == *" $id "* ]]; then
+                      remaining="$remaining$number $id"$'\n'
+                      continue
+                  fi
                   if ! state=$(readRunState "$id"); then
                       echo "::warning::#$number: could not read run $id"
                       continue
@@ -208,15 +223,16 @@ jobs:
                   fi
                   replay "$number" "$id"
                   code=$?
-                  [ "$code" -ne 3 ] || { pending=; return 3; }
+                  [ "$code" -ne 3 ] || return 3
               done <<< "$pending"
               pending=$remaining
           }
 
-          # Rounds are counted, not timed, so a fake sleep makes the wait deterministic and the loop always ends.
+          # The rounds are counted so a fake sleep makes the wait deterministic; the clock still bounds the time spent in the
+          # calls themselves, which the rounds alone do not.
           waitPending() {
-              local rounds=$((waitSeconds / pollSeconds)) round=0 left
-              while [ "$round" -lt "$rounds" ] && [ -n "$pending" ]; do
+              local rounds=$((waitSeconds / pollSeconds)) round=0 started=$SECONDS left
+              while [ "$round" -lt "$rounds" ] && [ -n "$pending" ] && [ $((SECONDS - started)) -lt "$waitSeconds" ]; do
                   [ "$round" -eq 0 ] || sleep "$pollSeconds"
                   round=$((round + 1))
                   pollPending || return 0
@@ -263,8 +279,8 @@ jobs:
           exit 0
           RECHECK_SWEEP_SCRIPT_EOF
           chmod +x "$RUNNER_TEMP/recheckSweep.sh"
-          [[ "$WAIT_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$WAIT_SECONDS" -le 600 ] \
-              || { echo "::error::waitSeconds must be an integer from 0 to 600"; exit 2; }
+          [[ "$WAIT_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$WAIT_SECONDS" -le 300 ] \
+              || { echo "::error::waitSeconds must be an integer from 0 to 300"; exit 2; }
           if [ "$MODE" = recover ]; then
               [[ "$WINDOW_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "::error::windowHours must be an integer from 1 to 9999"; exit 2; }
               SINCE=$(date -u -d "-${WINDOW_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ) \
