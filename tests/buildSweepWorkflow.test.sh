@@ -64,9 +64,11 @@ def structureProblems(doc)
     job = hashOf(jobs["sweep"])
     found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
     found << "concurrency" unless job["concurrency"] == {
-        "group" => "rebase-sweep-${{ github.repository }}-${{ github.ref_name }}",
+        "group" => "rebase-sweep-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.mode }}",
         "cancel-in-progress" => true,
     }
+    groupExpressions = hashOf(job["concurrency"])["group"].to_s.scan(/\$\{\{ ([^}]*) \}\}/).flatten.sort
+    found << "concurrency" unless groupExpressions == ["github.ref_name", "github.repository", "inputs.mode"]
     expectedEnv = {
         "GH_TOKEN" => "${{ github.token }}",
         "REPO" => "${{ github.repository }}",
@@ -84,12 +86,18 @@ def textProblems(text)
     found = []
     lines = text.lines.map(&:chomp)
     allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath)) \}\}\z/
-    group = /\A      group: rebase-sweep-\$\{\{ github\.repository \}\}-\$\{\{ github\.ref_name \}\}\z/
+    group = /\A      group: rebase-sweep-\$\{\{ github\.repository \}\}-\$\{\{ github\.ref_name \}\}-\$\{\{ inputs\.mode \}\}\z/
     found << "uses" if lines.any? { |line| line =~ /\A\s*(- )?uses:/ }
     found << "eventData" if text =~ /github\.event|github\.head_ref/
     found << "secrets" if text =~ /secrets\./
     found << "expression" unless lines.select { |line| line.include?("${{") }.all? { |line| line =~ allowed || line =~ group }
     return found
+end
+
+if ARGV[0] == "groups"
+    group = doc["jobs"]["sweep"]["concurrency"]["group"]
+    puts group.gsub("${{ inputs.mode }}", ARGV[2])
+    exit 0
 end
 
 if runStep
@@ -157,7 +165,7 @@ check "T-RF21-d/shape-2 the workflow holds no uses: line" test "$(grep -c -E '^\
 check "T-RF21-d/shape-3 no event data and no head_ref reach the file" \
     bash -c '! grep -q -E "github\.event|github\.head_ref" "$1"' _ "$dist"
 check "T-RF21-d/shape-4 the expression opener appears only in env lines of allowed values and the concurrency group" \
-    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$" | grep -v -F -x "      group: rebase-sweep-\${{ github.repository }}-\${{ github.ref_name }}"' _ "$dist"
+    bash -c '! grep -F "\${{" "$1" | grep -v -E "^      [A-Z_]+: \\$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.[a-zA-Z]+) \}\}$" | grep -v -F -x "      group: rebase-sweep-\${{ github.repository }}-\${{ github.ref_name }}-\${{ inputs.mode }}"' _ "$dist"
 check "T-RF21-d/shape-5 the script is indented at ten spaces and blank lines stay empty" \
     bash -c '! grep -q -E "^ +$" "$1"' _ "$dist"
 
@@ -185,11 +193,17 @@ expectMutation headRefInEnv eventData '{ sub(/github\.ref_name/, "github.head_re
 expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.mode }}\"" }'
 expectMutation noConcurrency concurrency '/^    concurrency:/ { skip = 2; next } skip > 0 { skip--; next } { print }'
 expectMutation noCancel concurrency '{ sub(/cancel-in-progress: true/, "cancel-in-progress: false"); print }'
-expectMutation eventInGroup eventData '{ sub(/-\$\{\{ github\.ref_name \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
-expectMutation eventInGroupExpr expression '{ sub(/-\$\{\{ github\.ref_name \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
-expectMutation inputInGroup expression '{ sub(/-\$\{\{ github\.ref_name \}\}$/, "-${{ inputs.mode }}") } { print }'
+expectMutation eventInGroup eventData '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
+expectMutation eventInGroupExpr expression '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "-${{ github.event.pull_request.number }}") } { print }'
+expectMutation noModeInGroup concurrency '{ sub(/-\$\{\{ inputs\.mode \}\}$/, "") } { print }'
+expectMutation workflowPathInGroup concurrency '{ sub(/inputs\.mode/, "inputs.workflowPath") } { print }'
+expectMutation windowHoursInGroup concurrency '{ sub(/\}\}$/, "}}-${{ inputs.windowHours }}") } { print }'
+expectMutation modeAndWorkflowPathInGroup expression '/^      group:/ { $0 = $0 "-${{ inputs.workflowPath }}" } { print }'
 expectMutation topConcurrency topConcurrency '{ print } $0 == "permissions: {}" { print "concurrency: sweep" }'
 expectMutation wrongDefault inputs '{ sub(/default: base-moved/, "default: recover"); print }'
+
+check "T-RF21-d/group-1 the base-moved and recover groups differ" \
+    test "$(ruby "$work/inspect.rb" groups "$dist" base-moved)" != "$(ruby "$work/inspect.rb" groups "$dist" recover)"
 
 # REFUSALS: exit 2, a message naming the cause and no output file at all (not even a partial one).
 refuse() {

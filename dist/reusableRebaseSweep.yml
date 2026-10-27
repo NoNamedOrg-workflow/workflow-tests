@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     # A newer push to the same base replaces the sweep still running, because the new one sees the newer base.
     concurrency:
-      group: rebase-sweep-${{ github.repository }}-${{ github.ref_name }}
+      group: rebase-sweep-${{ github.repository }}-${{ github.ref_name }}-${{ inputs.mode }}
       cancel-in-progress: true
     # The sweep only replays runs: the label and the comment are written by the replayed check with its own token.
     permissions:
