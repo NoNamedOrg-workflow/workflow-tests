@@ -29,31 +29,11 @@ case "$path" in
         ;;
     */actions/runs)
         sha=
-        listing=
         for arg in "$@"; do
             case "$arg" in
                 head_sha=*) sha=${arg#head_sha=} ;;
-                status=in_progress) listing=1 ;;
             esac
         done
-        if [ -n "$listing" ]; then
-            round=$(cat "$STUB_FX/listcnt" 2> /dev/null || echo 0)
-            echo $((round + 1)) > "$STUB_FX/listcnt"
-            [ -e "$STUB_FX/slowList" ] && command -p sleep "$(cat "$STUB_FX/slowList")"
-            [ -e "$STUB_FX/failList" ] && fail
-            [ -e "$STUB_FX/badList" ] && { echo 'not json'; exit 0; }
-            ids=
-            for file in "$STUB_FX"/runseq-*; do
-                [ -f "$file" ] || continue
-                count=$((round + 1))
-                total=$(wc -l < "$file")
-                [ "$count" -le "$total" ] || count=$total
-                state=$(sed -n "${count}p" "$file" | jq -r '.status' 2> /dev/null)
-                [ "$state" = in_progress ] && ids="$ids ${file##*runseq-}"
-            done
-            jq -cn --arg ids "$ids" '{workflow_runs: ($ids | split(" ") | map(select(. != "") | {id: tonumber, status: "in_progress"}))}'
-            exit 0
-        fi
         [ -e "$STUB_FX/failRuns-$sha" ] && fail
         [ -f "$STUB_FX/runs-$sha.json" ] && { cat "$STUB_FX/runs-$sha.json"; exit 0; }
         echo '{"workflow_runs":[]}'
@@ -69,9 +49,11 @@ case "$path" in
     */actions/runs/*)
         id=${path##*/}
         [ -e "$STUB_FX/failRun-$id" ] && fail
+        [ -e "$STUB_FX/slowRead" ] && command -p sleep "$(cat "$STUB_FX/slowRead")"
         [ -f "$STUB_FX/runseq-$id" ] || exit 0
-        count=$(cat "$STUB_FX/listcnt" 2> /dev/null || echo 0)
-        [ "$count" -ge 1 ] || count=1
+        # Each read of a run answers with the next state of its sequence and then repeats the last one.
+        count=$(( $(cat "$STUB_FX/runcnt-$id" 2> /dev/null || echo 0) + 1 ))
+        echo "$count" > "$STUB_FX/runcnt-$id"
         total=$(wc -l < "$STUB_FX/runseq-$id")
         [ "$count" -le "$total" ] || count=$total
         sed -n "${count}p" "$STUB_FX/runseq-$id"
@@ -79,6 +61,7 @@ case "$path" in
 esac
 exit 0
 STUB
+
 chmod +x "$work/bin/gh"
 
 # The wait must never really sleep: the fake only records how long it was asked to.
@@ -133,7 +116,7 @@ greenPr() {
 run() {
     : > "$work/calls.log"
     : > "$work/sleeps.log"
-    rm -f /tmp/pwned
+    rm -f /tmp/pwned "$fx"/runcnt-*
     output=$(cd "$work" && env -i PATH="$work/bin:$PATH" HOME="$work" STUB_LOG="$work/calls.log" STUB_FX="$fx" \
         STUB_SLEEPS="$work/sleeps.log" \
         GH_TOKEN="$token" REPO=o/r BASE=development "$@" "$bashBin" "$sweep" 2>&1)
@@ -335,34 +318,8 @@ expect "T-S12b 99 pull requests raise no page notice" 0
 lacks "no page notice" "the rest is not re-evaluated" "$output"
 
 reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")" "$(pr 4 "$(sha 4)")" "$(pr 5 "$(sha 5)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure 2026-03-02T00:00:00Z)"
-runsFor "$(sha 2)" "$(mkRun 20 1 2026-03-02T00:00:00Z completed timed_out 2026-03-02T00:00:00Z)"
-runsFor "$(sha 3)" "$(mkRun 30 1 2026-03-02T00:00:00Z completed cancelled 2026-03-02T00:00:00Z)"
-runsFor "$(sha 4)" "$(mkRun 40 1 2026-02-01T00:00:00Z completed failure 2026-02-01T00:00:00Z)"
-runsFor "$(sha 5)" "$(mkRun 50 1 2026-03-02T00:00:00Z completed success 2026-03-02T00:00:00Z)"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S13 recover replays failures inside the window only" 0
-has "failure replayed" "runs/10/rerun" "$calls"
-has "timed_out replayed" "runs/20/rerun" "$calls"
-has "cancelled replayed" "runs/30/rerun" "$calls"
-lacks "failure before SINCE not replayed" "runs/40/rerun" "$calls"
-lacks "success not replayed" "runs/50/rerun" "$calls"
-has "reports the old one" "#4 run 40 older than 2026-03-01T00:00:00Z: skipped" "$output"
-has "reports the success" "#5 run 50 already success: nothing to change" "$output"
-has "counts three" "replayed: 3" "$(echo "$output" | tail -n 1)"
-
-reset
-pulls "$(pr 1 "$(sha 1)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed neutral 2026-03-02T00:00:00Z)"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S13b recover leaves other conclusions alone" 0
-lacks "no rerun" "/rerun" "$calls"
-
-reset
 greenPr 1
-for bad in REPO=norepo REPO='o/r;id' MODE=weird MODE=recover "MODE=recover SINCE=2026-03-01" "MODE=recover SINCE=ontem" \
-    MAX_REPLAYS=0 MAX_REPLAYS=abc MAX_REPLAYS=-3 BASE= REPO=. REPO=.. REPO=a/.. REPO=../.. REPO=../r REPO=o/. REPO=./r; do
+for bad in MAX_REPLAYS=0 MAX_REPLAYS=abc MAX_REPLAYS=-3; do
     run $bad
     expect "T-S14 invalid configuration '$bad' exits 2" 2
     [ -z "$calls" ] || { failed=$((failed + 1)); echo "FAIL T-S14 '$bad' called gh: $calls"; }
@@ -412,7 +369,7 @@ run
 expect "T-S18 the token never shows in the output" 0
 lacks "no token in the output" "$token" "$output"
 lacks "no token in the gh calls" "$token" "$calls"
-run REPO=bad
+run MAX_REPLAYS=bad
 lacks "no token on a configuration error" "$token" "$output"
 
 reset
@@ -462,53 +419,12 @@ has "warns" "::warning::could not read the pull request listing" "$output"
 lacks "no rerun" "/rerun" "$calls"
 
 reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-02-01T00:00:00Z completed failure 2026-03-02T00:00:00Z)"
-runsFor "$(sha 2)" "$(mkRun 20 1 2026-03-02T00:00:00Z completed failure 2026-02-01T00:00:00Z)"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S21 the recover window is judged by updated_at, not created_at" 0
-has "created before but updated after SINCE is replayed" "runs/10/rerun" "$calls"
-lacks "created after but updated before SINCE is not replayed" "runs/20/rerun" "$calls"
-has "reports the old one" "#2 run 20 older than 2026-03-01T00:00:00Z: skipped" "$output"
-
-reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
+pulls "$(pr 1 "$(sha 1)")"
 runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed '' 2026-01-01T00:00:00Z)"
-runsFor "$(sha 2)" "$(mkRun 20 1 2026-03-02T00:00:00Z completed '' 2026-03-02T00:00:00Z)"
 run
 expect "T-S22 a completed run without a conclusion is treated as none" 0
-has "says none in base-moved" "#1 run 10 already none: nothing to change" "$output"
+has "says none" "#1 run 10 already none: nothing to change" "$output"
 lacks "no rerun" "/rerun" "$calls"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S22b a completed run without a conclusion is treated as none in recover" 0
-has "says none in recover" "#2 run 20 already none: nothing to change" "$output"
-lacks "no rerun in recover" "/rerun" "$calls"
-
-reset
-pulls "$(pr 1 "$(sha 1)")"
-printf '{"workflow_runs":[%s]}' "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure 2026-03-02T00:00:00Z | jq -c '.updated_at = null')" \
-    > "$fx/runs-$(sha 1).json"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S23 a JSON null update time is not replayed in recover" 0
-lacks "no rerun" "/rerun" "$calls"
-has "says why" "::notice::#1 run 10 has no valid update time: skipped" "$output"
-
-for badTime in null yesterday 2026-03-02 2026-03-02T00:00:00z "2026-03-02 00:00:00Z" 2026-03-02T00:00:00Z.5 x2026-03-02T00:00:00Z 2026-03-02T00:00:00Zx ''; do
-    reset
-    pulls "$(pr 1 "$(sha 1)")"
-    runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure "$badTime")"
-    run MODE=recover SINCE=2026-03-01T00:00:00Z
-    expect "T-S23b update time '$badTime' is not replayed in recover" 0
-    lacks "'$badTime' no rerun" "/rerun" "$calls"
-    has "'$badTime' says why" "::notice::#1 run 10 has no valid update time: skipped" "$output"
-done
-
-reset
-pulls "$(pr 1 "$(sha 1)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed success null)"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S23c a success without a valid update time still says nothing to change" 0
-has "conclusion is judged first" "#1 run 10 already success: nothing to change" "$output"
 
 reset
 pulls "$(pr 1 "$(sha 1)0")" "$(pr 2 ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD)" "$(pr 3 "$(sha 3)")"
@@ -533,19 +449,22 @@ has "the valid run is replayed" "runs/20/rerun" "$calls"
 lacks "no limit warning" "limit of" "$output"
 
 reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-01T00:00:00Z completed failure 2026-03-01T00:00:00Z)"
-runsFor "$(sha 2)" "$(mkRun 20 1 2026-02-28T23:59:59Z completed failure 2026-02-28T23:59:59Z)"
-runsFor "$(sha 3)" "$(mkRun 30 1 2026-03-01T00:00:01Z completed failure 2026-03-01T00:00:01Z)"
+pulls "$(pr 1 "$(sha 1)")"
+runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure 2026-03-02T00:00:00Z)"
 run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-S26 recover includes a run updated exactly at SINCE and skips one a second before" 0
-has "the run at SINCE is replayed" "runs/10/rerun" "$calls"
-lacks "the run a second before is not replayed" "runs/20/rerun" "$calls"
-has "the run a second before says why" "#2 run 20 older than 2026-03-01T00:00:00Z: skipped" "$output"
-has "the run after SINCE is replayed" "runs/30/rerun" "$calls"
+expect "T-S27 MODE and SINCE are not read any more: a failed run is never replayed" 0
+lacks "no rerun" "/rerun" "$calls"
+has "says nothing to change" "#1 run 10 already failure: nothing to change" "$output"
 
-# The runs of the second pass: runSeq gives the state of the run in round 1, 2, ... and repeats the last one. The
-# listing of the runs in progress counts the rounds.
+reset
+greenPr 1
+run REPO=norepo
+expect "T-S28 REPO comes from the github context and is not validated by the script" 0
+has "the repository is used as given" "api -X GET repos/norepo/pulls" "$calls"
+has "the run is replayed" "runs/10/rerun" "$calls"
+
+# The runs of the second pass: runSeq gives the state of a run each time it is read (1st read, 2nd read, ...) and
+# repeats the last one, so every round of the wait reads the next state.
 runSeq() {
     local id=$1
     shift
@@ -565,10 +484,6 @@ queries() {
     echo "$calls" | grep -c -x -F -- "api -X GET repos/o/r/actions/runs/$1"
 }
 
-lists() {
-    echo "$calls" | grep -c -F -- "status=in_progress"
-}
-
 sleepCount() {
     echo "$sleeps" | grep -c '^sleep'
 }
@@ -583,8 +498,8 @@ has "announces the wait" "::notice::#1 run 10 is in progress: waiting for it to 
 has "replays the run" "api -X POST repos/o/r/actions/runs/10/rerun --silent" "$calls"
 countIs "one rerun" "/rerun" 1 "$calls"
 has "reports the replay" "#1: replayed run 10" "$output"
-[ "$(lists)" -eq 3 ] || { failed=$((failed + 1)); echo "FAIL T-W1 listed $(lists) time(s), wanted 3"; }
-[ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W1 run 10 read $(queries 10) time(s), wanted 1"; }
+lacks "never lists the runs in progress" "status=in_progress" "$calls"
+[ "$(queries 10)" -eq 3 ] || { failed=$((failed + 1)); echo "FAIL T-W1 run 10 read $(queries 10) time(s), wanted 3"; }
 [ "$(sleepCount)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W1 slept $(sleepCount) time(s), wanted 2"; }
 has "sleeps the poll interval" "sleep 5" "$sleeps"
 has "last line is the count" "replayed: 1" "$(echo "$output" | tail -n 1)"
@@ -599,9 +514,10 @@ run WAIT_SECONDS=60 POLL_SECONDS=5
 expect "T-W1b several pending runs share one sleep per round" 0
 has "the first round replays the one already done" "runs/20/rerun" "$calls"
 has "the next round replays the other" "runs/10/rerun" "$calls"
+lacks "never lists the runs in progress" "status=in_progress" "$calls"
 [ "$(sleepCount)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W1b slept $(sleepCount) time(s), wanted 1"; }
 [ "$(queries 20)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W1b a finished run was read again"; }
-[ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W1b a run still listed was read one by one"; }
+[ "$(queries 10)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W1b the run still going was read $(queries 10) time(s), wanted 2"; }
 has "counts both" "replayed: 2" "$(echo "$output" | tail -n 1)"
 
 reset
@@ -612,9 +528,9 @@ run WAIT_SECONDS=60 POLL_SECONDS=5
 expect "T-W2 a pending run that ends in failure is not replayed" 0
 lacks "no rerun" "/rerun" "$calls"
 has "says nothing to change" "#1 run 10 finished failure: nothing to change" "$output"
+lacks "never lists the runs in progress" "status=in_progress" "$calls"
 [ "$(sleepCount)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W2 slept $(sleepCount) time(s), wanted 1"; }
-[ "$(lists)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W2 listed $(lists) time(s), wanted 2"; }
-[ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W2 read the run $(queries 10) time(s), wanted 1"; }
+[ "$(queries 10)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W2 read the run $(queries 10) time(s), wanted 2"; }
 has "counts zero" "replayed: 0" "$(echo "$output" | tail -n 1)"
 
 reset
@@ -626,6 +542,7 @@ expect "T-W3 a run that stays in progress is warned about once and never replaye
 lacks "no rerun" "/rerun" "$calls"
 countIs "a single warning" "::warning::" 1 "$output"
 has "the warning counts the runs left" "::warning::1 run(s) still in progress after 20s: not replayed" "$output"
+[ "$(queries 10)" -eq 4 ] || { failed=$((failed + 1)); echo "FAIL T-W3 read the run $(queries 10) time(s), wanted 4"; }
 has "counts zero" "replayed: 0" "$(echo "$output" | tail -n 1)"
 
 reset
@@ -639,7 +556,8 @@ expect "T-W3b a queued run read by the second pass also stays pending" 0
 countIs "a single warning for both runs" "::warning::" 1 "$output"
 has "counts both" "::warning::2 run(s) still in progress after 10s: not replayed" "$output"
 [ "$(queries 10)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W3b the queued run was read $(queries 10) time(s), wanted 2"; }
-[ "$(queries 20)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W3b a listed run was read one by one"; }
+[ "$(queries 20)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W3b the run in progress was read $(queries 20) time(s), wanted 2"; }
+
 
 reset
 pulls "$(pr 1 "$(sha 1)")"
@@ -719,34 +637,34 @@ done
 reset
 pulls "$(pr 1 "$(sha 1)")"
 pendingPr 1
-runSeq 10 "$(runState 10 completed success)"
-run MODE=recover SINCE=2026-03-01T00:00:00Z
-expect "T-W9 recover still skips a run in progress" 0
-has "old notice" "::notice::#1 run 10 is in_progress: skipped" "$output"
-lacks "no read of the run" "actions/runs/10" "$calls"
-lacks "no rerun" "/rerun" "$calls"
-[ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W9 slept"; }
-
-reset
-pulls "$(pr 1 "$(sha 1)")"
-pendingPr 1
 runSeq 10 "$(runState 10 in_progress '')"
 run WAIT_SECONDS=30 POLL_SECONDS=7
 expect "T-W10 the rounds are WAIT_SECONDS / POLL_SECONDS rounded down" 0
-[ "$(lists)" -eq 4 ] || { failed=$((failed + 1)); echo "FAIL T-W10 listed $(lists) time(s), wanted 4"; }
+[ "$(queries 10)" -eq 4 ] || { failed=$((failed + 1)); echo "FAIL T-W10 read the run $(queries 10) time(s), wanted 4"; }
 [ "$(sleepCount)" -eq 3 ] || { failed=$((failed + 1)); echo "FAIL T-W10 slept $(sleepCount) time(s), wanted 3"; }
 has "sleeps the poll interval" "sleep 7" "$sleeps"
 
 run WAIT_SECONDS=4 POLL_SECONDS=5
 expect "T-W10b a wait shorter than the poll interval has no rounds" 0
-[ "$(lists)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W10b listed the runs"; }
+[ "$(queries 10)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W10b read the run"; }
 [ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W10b slept"; }
 has "still warns about the run left" "::warning::1 run(s) still in progress after 4s: not replayed" "$output"
 
 run WAIT_SECONDS=5 POLL_SECONDS=5
 expect "T-W10c one round reads once and never sleeps" 0
-[ "$(lists)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W10c listed $(lists) time(s), wanted 1"; }
+[ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W10c read the run $(queries 10) time(s), wanted 1"; }
 [ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W10c slept"; }
+
+reset
+pulls "$(pr 1 "$(sha 1)")"
+pendingPr 1
+runSeq 10 "$(runState 10 in_progress '')"
+run WAIT_SECONDS=30
+expect "T-W16 the default poll interval is 10 seconds" 0
+[ "$(queries 10)" -eq 3 ] || { failed=$((failed + 1)); echo "FAIL T-W16 read the run $(queries 10) time(s), wanted 3"; }
+[ "$(sleepCount)" -eq 2 ] || { failed=$((failed + 1)); echo "FAIL T-W16 slept $(sleepCount) time(s), wanted 2"; }
+has "sleeps ten seconds" "sleep 10" "$sleeps"
+
 
 reset
 pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
@@ -792,10 +710,10 @@ reset
 pulls "$(pr 1 "$(sha 1)")"
 pendingPr 1
 runSeq 10 "$(runState 10 in_progress '')"
-echo 2 > "$fx/slowList"
+echo 2 > "$fx/slowRead"
 run WAIT_SECONDS=2 POLL_SECONDS=1
 expect "T-W11 the wait stops at the real deadline even with rounds left" 0
-[ "$(lists)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W11 listed $(lists) time(s), wanted 1"; }
+[ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W11 read the run $(queries 10) time(s), wanted 1"; }
 has "warns about the run left" "::warning::1 run(s) still in progress after 2s: not replayed" "$output"
 lacks "no rerun" "/rerun" "$calls"
 
@@ -811,34 +729,15 @@ for n in $(seq 1 50); do
 done
 pulls "${items[@]}"
 run WAIT_SECONDS=30 POLL_SECONDS=5
-expect "T-W12 fifty pending runs cost one listing per round plus one read each" 0
-[ "$(lists)" -eq 6 ] || { failed=$((failed + 1)); echo "FAIL T-W12 listed $(lists) time(s), wanted 6"; }
+expect "T-W12 fifty pending runs are each read once per round, so the cost is bounded by the rounds" 0
+lacks "never lists the runs in progress" "status=in_progress" "$calls"
 total=0
 for n in $(seq 1 50); do
     total=$((total + $(queries "$(( n * 10 ))")))
 done
-[ "$total" -eq 50 ] || { failed=$((failed + 1)); echo "FAIL T-W12 read $total runs one by one, wanted 50"; }
+[ "$total" -eq 300 ] || { failed=$((failed + 1)); echo "FAIL T-W12 read $total runs, wanted 300 (50 runs, 6 rounds)"; }
 has "all fifty replayed" "replayed: 50" "$(echo "$output" | tail -n 1)"
 
-reset
-pulls "$(pr 1 "$(sha 1)")"
-pendingPr 1
-runSeq 10 "$(runState 10 in_progress '')" "$(runState 10 completed success)"
-touch "$fx/failList"
-run WAIT_SECONDS=60 POLL_SECONDS=5
-expect "T-W13 a failing listing falls back to reading each pending run" 0
-has "says so" "::notice::could not list the runs in progress: reading each pending run" "$output"
-has "the run is still replayed" "runs/10/rerun" "$calls"
-lacks "no warning" "::warning::" "$output"
-
-reset
-pulls "$(pr 1 "$(sha 1)")"
-pendingPr 1
-runSeq 10 "$(runState 10 completed success)"
-touch "$fx/badList"
-run WAIT_SECONDS=60 POLL_SECONDS=5
-expect "T-W13b a listing that is not JSON falls back the same way" 0
-has "the run is still replayed" "runs/10/rerun" "$calls"
 
 reset
 pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
@@ -870,7 +769,7 @@ run
 expect "T-W14 a run in progress with a non numeric id is skipped and never queried" 0
 has "skipped notice" "::notice::#1 run ../x is in_progress: skipped" "$output"
 lacks "no read with that id" "../x" "$calls"
-[ "$(lists)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W14 listed the runs"; }
+lacks "never lists the runs in progress" "status=in_progress" "$calls"
 [ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W14 slept"; }
 
 reset
@@ -883,7 +782,7 @@ run MAX_REPLAYS=1
 expect "T-W15 reaching the ceiling in the main pass ends the sweep without waiting" 0
 countIs "a single limit warning" "::warning::limit of 1 reruns reached" 1 "$output"
 countIs "one rerun only" "/rerun" 1 "$calls"
-[ "$(lists)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W15 waited for the pending run"; }
+[ "$(queries 10)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W15 waited for the pending run"; }
 [ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W15 slept"; }
 
 echo "recheckSweep: $passed passed, $failed failed"

@@ -51,7 +51,7 @@ def structureProblems(doc)
     found = []
     trigger = hashOf(doc["on"] || doc[true])
     inputs = hashOf(hashOf(trigger["workflow_call"])["inputs"])
-    wanted = {"mode" => "base-moved", "windowHours" => "24", "workflowPath" => ".github/workflows/enforceRebase.yml", "waitSeconds" => "120"}
+    wanted = {"workflowPath" => ".github/workflows/enforceRebase.yml", "waitSeconds" => "120"}
     found << "inputs" unless inputs.keys.sort == wanted.keys.sort
     found << "inputs" unless wanted.all? { |key, value| hashOf(inputs[key])["default"] == value }
     found << "inputs" unless inputs.values.all? { |input| hashOf(input)["type"] == "string" }
@@ -69,8 +69,6 @@ def structureProblems(doc)
         "GH_TOKEN" => "${{ github.token }}",
         "REPO" => "${{ github.repository }}",
         "BASE" => "${{ github.ref_name }}",
-        "MODE" => "${{ inputs.mode }}",
-        "WINDOW_HOURS" => "${{ inputs.windowHours }}",
         "WORKFLOW_PATH" => "${{ inputs.workflowPath }}",
         "WAIT_SECONDS" => "${{ inputs.waitSeconds }}",
     }
@@ -82,7 +80,7 @@ end
 def textProblems(text)
     found = []
     lines = text.lines.map(&:chomp)
-    allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(mode|windowHours|workflowPath|waitSeconds)) \}\}\z/
+    allowed = /\A      [A-Z_]+: \$\{\{ (github\.token|github\.repository|github\.ref_name|inputs\.(workflowPath|waitSeconds)) \}\}\z/
     found << "uses" if lines.any? { |line| line =~ /\A\s*(- )?uses:/ }
     found << "eventData" if text =~ /github\.event|github\.head_ref/
     found << "secrets" if text =~ /secrets\./
@@ -180,7 +178,7 @@ expectMutation addUses uses '{ print } /^    steps:/ { print "      - uses: acti
 expectMutation eventInRun eventData '{ print } /set -uo pipefail/ { print "          echo \"${{ github.event.pull_request.title }}\"" }'
 expectMutation eventInRunExpr expression '{ print } /set -uo pipefail/ { print "          echo \"${{ github.event.pull_request.title }}\"" }'
 expectMutation headRefInEnv eventData '{ sub(/github\.ref_name/, "github.head_ref"); print }'
-expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.mode }}\"" }'
+expectMutation inputInRun expression '{ print } /set -uo pipefail/ { print "          echo \"${{ inputs.waitSeconds }}\"" }'
 expectMutation noTimeout timeout '/^    timeout-minutes:/ { next } { print }'
 expectMutation longTimeout timeout '{ sub(/timeout-minutes: 10/, "timeout-minutes: 60"); print }'
 expectMutation noWaitInput inputs '/^      waitSeconds:/ { skip = 3; next } skip > 0 { skip--; next } { print }'
@@ -191,7 +189,9 @@ expectMutation topConcurrencyCancel topConcurrency '{ print } $0 == "permissions
 expectMutation jobConcurrency concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency: sweep" }'
 expectMutation jobConcurrencyCancel concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency:"; print "      group: sweep"; print "      cancel-in-progress: true" }'
 expectMutation jobConcurrencyQueue concurrency '{ print } /^    timeout-minutes:/ { print "    concurrency:"; print "      group: sweep"; print "      cancel-in-progress: false" }'
-expectMutation wrongDefault inputs '{ sub(/default: base-moved/, "default: recover"); print }'
+expectMutation wrongPathDefault inputs '{ sub(/default: .github\/workflows\/enforceRebase.yml/, "default: .github/workflows/other.yml"); print }'
+expectMutation modeInputBack inputs '{ print } /^    inputs:/ { print "      mode:"; print "        type: string"; print "        default: base-moved" }'
+expectMutation windowInputBack inputs '{ print } /^    inputs:/ { print "      windowHours:"; print "        type: string"; print "        default: \"24\"" }'
 
 check "T-RF21-d/concurrency-1 the generated file holds no concurrency at all" test "$(grep -c -i concurrency "$dist")" -eq 0
 
@@ -283,7 +283,7 @@ check "T-RF21-c/out-4 the builder is bash 3.2 compatible (no bash 4 features)" \
 mkdir -p "$work/fakeBin"
 cat > "$work/fakeBin/chmod" <<'FAKE'
 #!/usr/bin/env bash
-printf '#!/usr/bin/env bash\necho "probe SINCE=${SINCE-unset} MODE=$MODE"\necho "wait=${WAIT_SECONDS-unset}"\n' > "$2"
+printf '#!/usr/bin/env bash\necho "probe SINCE=${SINCE-unset}"\necho "wait=${WAIT_SECONDS-unset}"\n' > "$2"
 exec /bin/chmod "$@"
 FAKE
 cat > "$work/fakeBin/date" <<'FAKE'
@@ -293,64 +293,41 @@ echo 2026-01-01T00:00:00Z
 FAKE
 chmod +x "$work/fakeBin/chmod" "$work/fakeBin/date"
 
-# A date that cannot do the arithmetic, as on a runner image without GNU date.
-mkdir -p "$work/brokenDateBin"
-cp "$work/fakeBin/chmod" "$work/brokenDateBin/chmod"
-printf '#!/usr/bin/env bash\necho "date: invalid option" >&2\nexit 1\n' > "$work/brokenDateBin/date"
-chmod +x "$work/brokenDateBin/chmod" "$work/brokenDateBin/date"
-
-# runStep YAML MODE WINDOW_HOURS [BINDIR] [WAIT_SECONDS]: leaves the output in $stepOut and the exit code in $stepStatus.
+# runStep YAML WAIT_SECONDS [NAME=VALUE...]: leaves the output in $stepOut and the exit code in $stepStatus.
 runStep() {
-    local body="$work/step.sh"
-    runBody "$1" > "$body"
+    local body="$work/step.sh" yaml=$1 wait=$2
+    shift 2
+    runBody "$yaml" > "$body"
     rm -rf "$work/scene"
     mkdir -p "$work/scene/tmp"
     : > "$work/date.log"
-    stepOut=$(cd "$work/scene" && env PATH="${4:-$work/fakeBin}:$PATH" MODE="$2" WINDOW_HOURS="$3" WAIT_SECONDS="${5-120}" RUNNER_TEMP="$work/scene/tmp" \
-        FAKE_DATE_LOG="$work/date.log" "$bashBin" -e "$body" 2>&1 < /dev/null)
+    stepOut=$(cd "$work/scene" && env PATH="$work/fakeBin:$PATH" WAIT_SECONDS="$wait" RUNNER_TEMP="$work/scene/tmp" \
+        FAKE_DATE_LOG="$work/date.log" "$@" "$bashBin" -e "$body" 2>&1 < /dev/null)
     stepStatus=$?
 }
 
 # One word per violated behavior, so a mutated workflow can prove the cases are able to fail.
 behaviorProblems() {
-    runStep "$1" base-moved 24
-    [ "$stepStatus" -eq 0 ] || echo baseMovedExit
-    echo "$stepOut" | grep -q -x 'probe SINCE=unset MODE=base-moved' || echo baseMovedSince
-    [ ! -s "$work/date.log" ] || echo baseMovedDate
+    runStep "$1" 120
+    [ "$stepStatus" -eq 0 ] || echo defaultExit
+    echo "$stepOut" | grep -q -x 'probe SINCE=unset' || echo sinceDefined
+    echo "$stepOut" | grep -q -x 'wait=120' || echo waitDefault
+    [ ! -s "$work/date.log" ] || echo dateCalled
 
-    runStep "$1" recover 6
-    [ "$stepStatus" -eq 0 ] || echo recoverExit
-    echo "$stepOut" | grep -q -x 'probe SINCE=2026-01-01T00:00:00Z MODE=recover' || echo recoverSince
-    grep -q -F -- '-6 hours' "$work/date.log" || echo recoverWindow
+    # The mode and the window are not read any more, even when the caller environment still carries them.
+    runStep "$1" 120 MODE=recover WINDOW_HOURS=6
+    [ "$stepStatus" -eq 0 ] || echo oldSettingsExit
+    echo "$stepOut" | grep -q -x 'probe SINCE=unset' || echo oldSettingsSince
+    [ ! -s "$work/date.log" ] || echo oldSettingsDate
 
-    runStep "$1" recover 9999
-    [ "$stepStatus" -eq 0 ] || echo maxWindowExit
-    grep -q -F -- '-9999 hours' "$work/date.log" || echo maxWindow
-
-    runStep "$1" recover 6 "$work/brokenDateBin"
-    [ "$stepStatus" -eq 2 ] || echo brokenDateExit
-    echo "$stepOut" | grep -q 'probe' && echo brokenDateRanScript
-    echo "$stepOut" | grep -q -F '::error::' || echo brokenDateMessage
-
-    local bad
-    for bad in 0 abc '1; touch x' '' '-3' '007' 10000 99999999999999; do
-        runStep "$1" recover "$bad"
-        [ "$stepStatus" -eq 2 ] || echo "invalidExit[$bad]"
-        echo "$stepOut" | grep -q 'probe' && echo "invalidRanScript[$bad]"
-        echo "$stepOut" | grep -q -F 'windowHours must be an integer from 1 to 9999' || echo "invalidMessage[$bad]"
-        [ ! -e "$work/scene/x" ] || echo "invalidInjected[$bad]"
-    done
-
-    local wait mode
-    for mode in base-moved recover; do
-        for wait in 0 120 300; do
-            runStep "$1" "$mode" 6 "" "$wait"
-            [ "$stepStatus" -eq 0 ] || echo "waitExit[$mode $wait]"
-            echo "$stepOut" | grep -q -x "wait=$wait" || echo "waitPassed[$mode $wait]"
-        done
+    local wait
+    for wait in 0 120 300; do
+        runStep "$1" "$wait"
+        [ "$stepStatus" -eq 0 ] || echo "waitExit[$wait]"
+        echo "$stepOut" | grep -q -x "wait=$wait" || echo "waitPassed[$wait]"
     done
     for wait in 301 600 1000 abc '' '1; touch x' -1 007 1.5; do
-        runStep "$1" base-moved 24 "" "$wait"
+        runStep "$1" "$wait"
         [ "$stepStatus" -eq 2 ] || echo "invalidWaitExit[$wait]"
         echo "$stepOut" | grep -q 'probe' && echo "invalidWaitRanScript[$wait]"
         echo "$stepOut" | grep -q -F 'waitSeconds must be an integer from 0 to 300' || echo "invalidWaitMessage[$wait]"
@@ -360,25 +337,17 @@ behaviorProblems() {
 }
 
 behaviorProblems "$dist" > "$work/behavior.out"
-check "T-RF21-b/behavior-1 the run step handles both modes and refuses a bad window" test ! -s "$work/behavior.out"
+check "T-RF21-b/behavior-1 the run step passes the wait on and refuses a bad one" test ! -s "$work/behavior.out"
 [ -s "$work/behavior.out" ] && sed 's/^/    /' "$work/behavior.out"
 
-runStep "$dist" base-moved 24
-check "T-RF21-b/behavior-2 base-moved does not define SINCE" bash -c 'echo "$1" | grep -q -x "probe SINCE=unset MODE=base-moved"' _ "$stepOut"
-runStep "$dist" recover 6
-check "T-RF21-b/behavior-3 recover defines SINCE from the window" bash -c 'echo "$1" | grep -q "SINCE=2026-01-01T00:00:00Z"' _ "$stepOut"
-runStep "$dist" recover '1; touch x'
-check "T-RF21-b/behavior-4 an injected window exits 2 and runs nothing" test "$stepStatus" -eq 2 -a ! -e "$work/scene/x"
-
-mutateTemplate noValidation '!/windowHours must be an integer from 1 to 9999/ { print }'
-buildFrom noValidation
-behaviorProblems "$work/noValidation.yml" > "$work/noValidation.problems"
-check "T-RF21-b/mutant-noValidation the behavior cases fail when the window is not validated" test -s "$work/noValidation.problems"
-
-mutateTemplate alwaysSince '{ sub(/\[ "\$MODE" = recover \]/, "true"); print }'
-buildFrom alwaysSince
-behaviorProblems "$work/alwaysSince.yml" > "$work/alwaysSince.problems"
-check "T-RF21-b/mutant-alwaysSince the behavior cases fail when base-moved also computes SINCE" test -s "$work/alwaysSince.problems"
+runStep "$dist" 120
+check "T-RF21-b/behavior-2 the step defines no SINCE and never calls date" \
+    bash -c 'echo "$1" | grep -q -x "probe SINCE=unset" && [ ! -s "$2" ]' _ "$stepOut" "$work/date.log"
+runStep "$dist" 120 MODE=recover WINDOW_HOURS=6
+check "T-RF21-b/behavior-3 MODE and WINDOW_HOURS are not read any more" \
+    bash -c 'echo "$1" | grep -q -x "probe SINCE=unset" && [ ! -s "$2" ]' _ "$stepOut" "$work/date.log"
+runStep "$dist" '1; touch x'
+check "T-RF21-b/behavior-4 an injected wait exits 2 and runs nothing" test "$stepStatus" -eq 2 -a ! -e "$work/scene/x"
 
 behaviorMutant() {
     local name=$1 program=$2
@@ -388,14 +357,12 @@ behaviorMutant() {
     check "T-RF21-b/mutant-$name the behavior cases fail when the template is altered this way" test -s "$work/$name.problems"
 }
 
-behaviorMutant dateFailureIgnored '/could not compute/ { print "                  || true"; next } { print }'
-behaviorMutant dateFailureExitsOne '/could not compute/ { sub(/exit 2/, "exit 1") } { print }'
 behaviorMutant noWaitValidation '/waitSeconds must be/ { next } { print }'
 behaviorMutant waitUnbounded '{ sub(/-le 300/, "-le 3000") } { print }'
 behaviorMutant waitFailureExitsOne '/waitSeconds must be/ { sub(/exit 2/, "exit 1") } { print }'
 behaviorMutant waitRegexLoose '/waitSeconds must be/ { next } { sub(/\^\(0\|\[1-9\]\[0-9\]\{0,2\}\)\$/, ".*") } { print }'
-behaviorMutant windowUnbounded '{ sub(/\{0,3\}/, "*") } { print }'
-behaviorMutant windowTooSmall '{ sub(/\{0,3\}/, "{0,2}") } { print }'
+behaviorMutant sinceDefined '{ print } index($0, "chmod +x") { print "          export SINCE=2026-01-01T00:00:00Z" }'
+behaviorMutant dateCalled '{ print } index($0, "chmod +x") { print "          date -u > /dev/null" }'
 
 # CALLER EXAMPLE
 cat > "$work/callerCheck.rb" <<'RUBY'
@@ -406,12 +373,11 @@ trigger = doc["on"] || doc[true]
 found = []
 found << "name" unless doc["name"] == "rebase-sweep"
 found << "push" unless trigger["push"] == {"branches" => ["main"]}
-mode = trigger["workflow_dispatch"]["inputs"]["mode"]
-found << "dispatch" unless mode["type"] == "choice" && mode["options"] == ["base-moved", "recover"] && mode["default"] == "base-moved"
+found << "dispatch" unless trigger.key?("workflow_dispatch") && [nil, {}].include?(trigger["workflow_dispatch"])
 found << "topPermissions" unless doc["permissions"] == {}
 job = doc["jobs"]["sweep"]
 found << "uses" unless job["uses"] == "OWNER/CENTRAL-REPO/.github/workflows/reusable-rebase-sweep.yml@development"
-found << "with" unless job["with"] == {"mode" => "${{ inputs.mode || 'base-moved' }}"}
+found << "with" unless job["with"].nil?
 found << "jobPermissions" unless job["permissions"] == {"actions" => "write", "pull-requests" => "read"}
 puts found
 RUBY
@@ -429,6 +395,10 @@ check "T-RF21-f/caller-4 the caller check fails when the uses path changes" test
 sed 's/actions: write/actions: read/' "$caller" > "$work/callerMutant.yml"
 ruby "$work/callerCheck.rb" "$work/callerMutant.yml" > "$work/callerMutant.out" 2>&1
 check "T-RF21-f/caller-2 the caller check fails when a permission changes" test -s "$work/callerMutant.out"
+
+awk '{ print } /^ +uses:/ { print "    with:"; print "      mode: base-moved" }' "$caller" > "$work/callerWithMode.yml"
+ruby "$work/callerCheck.rb" "$work/callerWithMode.yml" > "$work/callerWithMode.out" 2>&1
+check "T-RF21-f/caller-5 the caller check fails when the caller passes an input again" test -s "$work/callerWithMode.out"
 
 echo "buildSweepWorkflow: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]
