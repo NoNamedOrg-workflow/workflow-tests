@@ -22,8 +22,8 @@ permissions: {}
 jobs:
   sweep:
     runs-on: ubuntu-latest
-    # Sweeps of different pushes run side by side: GitHub refuses a rerun of a run already rerunning and the script
-    # treats that refusal as benign.
+    # No concurrency on purpose: sweeps of two pushes can overlap, and GitHub refuses a rerun of a run that is already
+    # being rerun, which the script treats as benign.
     timeout-minutes: 10
     # The sweep only replays runs: the label and the comment are written by the replayed check with its own token.
     permissions:

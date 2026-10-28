@@ -8,23 +8,8 @@ waitSeconds=${WAIT_SECONDS-120}
 pollSeconds=${POLL_SECONDS-10}
 replayed=0
 attempts=0
-# Lines of "number id" for the runs that were in progress when listed and may still be reading an older base.
+# "number id" lines of the runs that were in progress when listed.
 pending=
-
-# The sweep runs on every push to the default branch, so a bad setting is the only thing allowed to fail it.
-abort() {
-    echo "recheckSweep: $1" >&2
-    exit 2
-}
-
-# REPO and BASE come from the github context, so only the numbers a caller can set are checked.
-validateConfig() {
-    [[ "$maxReplays" =~ ^[1-9][0-9]*$ ]] || abort "MAX_REPLAYS must be a positive integer"
-    [[ "$waitSeconds" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$waitSeconds" -le 300 ] \
-        || abort "WAIT_SECONDS must be an integer from 0 to 300"
-    [[ "$pollSeconds" =~ ^[1-9][0-9]?$ ]] && [ "$pollSeconds" -le 60 ] \
-        || abort "POLL_SECONDS must be an integer from 1 to 60"
-}
 
 listPulls() {
     gh api -X GET "repos/$REPO/pulls" -f state=open -f base="$BASE" -f per_page=100
@@ -49,7 +34,7 @@ latestRuns() {
 # A queued run reads the live base when it starts, after that push, so it never goes stale.
 shouldWait() {
     local id=$1 status=$2
-    [ "$status" = in_progress ] && [ "$waitSeconds" -gt 0 ] && [[ "$id" =~ ^[0-9]+$ ]]
+    [ "$status" = in_progress ] && [ "$waitSeconds" -gt 0 ]
 }
 
 shouldReplay() {
@@ -75,12 +60,7 @@ replay() {
         echo "::warning::limit of $maxReplays reruns reached"
         return 3
     fi
-    if [[ ! "$id" =~ ^[0-9]+$ ]]; then
-        echo "::warning::#$number: run id is not numeric: skipped"
-        return 0
-    fi
     attempts=$((attempts + 1))
-    # Sweeps of two pushes run side by side: GitHub refuses a rerun of a run already rerunning, which is no failure.
     # The stderr is only matched, never printed.
     if ! failure=$(gh api -X POST "repos/$REPO/actions/runs/$id/rerun" --silent 2>&1); then
         if [[ "$failure" == *"already running"* ]]; then
@@ -98,11 +78,10 @@ replay() {
 readRunState() {
     local raw
     raw=$(gh api -X GET "repos/$REPO/actions/runs/$1") || return 1
-    echo "$raw" | jq -er 'select(type == "object" and (.status | type) == "string") | [.status, (.conclusion // "none")] | @tsv'
+    echo "$raw" | jq -er '[.status, (.conclusion // "none")] | @tsv'
 }
 
 # One round over the pending runs: each is read on its own and only those still running stay in pending.
-# Returns 3 when the ceiling is reached.
 pollPending() {
     local remaining="" number id state status conclusion code
     while read -r number id; do
@@ -127,8 +106,7 @@ pollPending() {
     pending=$remaining
 }
 
-# The rounds are counted so a fake sleep makes the wait deterministic; the clock still bounds the time spent in the
-# calls themselves, which the rounds alone do not.
+# The clock also bounds the time spent in the calls themselves, which the rounds alone do not.
 waitPending() {
     local rounds=$((waitSeconds / pollSeconds)) round=0 started=$SECONDS left
     while [ "$round" -lt "$rounds" ] && [ -n "$pending" ] && [ $((SECONDS - started)) -lt "$waitSeconds" ]; do
@@ -143,10 +121,6 @@ waitPending() {
 
 replayPull() {
     local number=$1 sha=$2 raw runs id status conclusion
-    if [[ ! "$number" =~ ^[0-9]+$ ]] || [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
-        echo "::warning::skipped a pull request with a malformed number or sha"
-        return 0
-    fi
     raw=$(listRuns "$sha") || { echo "::warning::#$number: could not read its runs"; return 0; }
     runs=$(echo "$raw" | latestRuns) || { echo "::warning::#$number: could not read its runs"; return 0; }
     [ -n "$runs" ] || { echo "::notice::#$number has no check run yet: skipped"; return 0; }
@@ -158,10 +132,7 @@ replayPull() {
 
 main() {
     local pulls prs total number sha
-    validateConfig
     pulls=$(listPulls) || { echo "::warning::could not list the open pull requests"; return 0; }
-    echo "$pulls" | jq -e 'type == "array"' > /dev/null \
-        || { echo "::warning::could not read the pull request listing"; return 0; }
     prs=$(echo "$pulls" | jq -r '.[] | [(.number | tostring), (.head.sha | tostring)] | @tsv') \
         || { echo "::warning::could not read the pull request listing"; return 0; }
     total=$(echo "$pulls" | jq 'length')

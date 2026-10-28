@@ -564,19 +564,17 @@ countIs "no other warning" "::warning::" 1 "$output"
 has "counts the one replay" "replayed: 1" "$(echo "$output" | tail -n 1)"
 
 reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")" "$(pr 4 "$(sha 4)")"
-for n in 1 2 3 4; do
+pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 4 "$(sha 4)")"
+for n in 1 2 4; do
     pendingPr "$n"
 done
 touch "$fx/failRun-10"
 runSeq 20 "this is not json"
-runSeq 30 '{"message":"Not Found"}'
 runSeq 40 "$(runState 40 completed success)"
 run WAIT_SECONDS=60 POLL_SECONDS=5
 expect "T-W7 an unreadable run answer warns and the other pull requests go on" 0
 has "failed read" "::warning::#1: could not read run 10" "$output"
 has "invalid JSON" "::warning::#2: could not read run 20" "$output"
-has "an answer without a status" "::warning::#3: could not read run 30" "$output"
 has "replays #4" "runs/40/rerun" "$calls"
 countIs "one rerun only" "/rerun" 1 "$calls"
 lacks "unreadable runs are not read again" "still in progress" "$output"

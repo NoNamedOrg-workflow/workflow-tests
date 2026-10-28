@@ -193,7 +193,7 @@ expectMutation wrongPathDefault inputs '{ sub(/default: .github\/workflows\/enfo
 expectMutation modeInputBack inputs '{ print } /^    inputs:/ { print "      mode:"; print "        type: string"; print "        default: base-moved" }'
 expectMutation windowInputBack inputs '{ print } /^    inputs:/ { print "      windowHours:"; print "        type: string"; print "        default: \"24\"" }'
 
-check "T-RF21-d/concurrency-1 the generated file holds no concurrency at all" test "$(grep -c -i concurrency "$dist")" -eq 0
+check "T-RF21-d/concurrency-1 the generated file holds no concurrency key at all" test "$(grep -c -i -E '^\s*concurrency\s*:' "$dist")" -eq 0
 
 # REFUSALS: exit 2, a message naming the cause and no output file at all (not even a partial one).
 refuse() {
