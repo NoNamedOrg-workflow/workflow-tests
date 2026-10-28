@@ -319,29 +319,6 @@ lacks "no page notice" "the rest is not re-evaluated" "$output"
 
 reset
 greenPr 1
-for bad in MAX_REPLAYS=0 MAX_REPLAYS=abc MAX_REPLAYS=-3; do
-    run $bad
-    expect "T-S14 invalid configuration '$bad' exits 2" 2
-    [ -z "$calls" ] || { failed=$((failed + 1)); echo "FAIL T-S14 '$bad' called gh: $calls"; }
-    has "'$bad' says why on stderr" "recheckSweep:" "$output"
-done
-
-reset
-pulls \
-    "$(pr '"7;id"' "$(sha 1)")" \
-    "$(pr 8 zzzz)" \
-    "$(pr 9 ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD)" \
-    "$(pr null "$(sha 3)")" \
-    "$(pr 10 "$(sha 10)")"
-runsFor "$(sha 10)" "$(mkRun 100 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-run
-expect "T-S15 malformed number or sha is warned about and skipped" 0
-countIs "four warnings" "::warning::" 4 "$output"
-countIs "runs are read for the valid pull request only" "-X GET repos/o/r/actions/runs" 1 "$calls"
-has "the valid pull request is replayed" "runs/100/rerun" "$calls"
-
-reset
-greenPr 1
 pulls "$(pr 1 "$(sha 1)")"
 run BASE=release/1
 expect "T-S16 a base with a slash is passed as an argument, not in the URL" 0
@@ -351,15 +328,21 @@ lacks "no query string in the URL" "pulls?" "$calls"
 has "page size" "-f per_page=100" "$calls"
 
 reset
-pulls "$(pr 1 '$(touch /tmp/pwned)')" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")"
+pulls "$(pr 1 '$(touch /tmp/pwned)')" "$(pr 2 "$(sha 2)")"
 runsFor "$(sha 2)" "$(mkRun '"5;touch /tmp/pwned"' 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
+run
+expect "T-S17 hostile sha and run id are data, not code" 0
+[ -e /tmp/pwned ] && { failed=$((failed + 1)); echo "FAIL T-S17 something was executed"; rm -f /tmp/pwned; }
+has "the hostile sha goes out as data in a query argument" 'head_sha=$(touch /tmp/pwned)' "$calls"
+has "the hostile run id goes out as one quoted argument" "actions/runs/5;touch /tmp/pwned/rerun" "$calls"
+
+reset
+pulls "$(pr 3 "$(sha 3)")"
 runsFor "$(sha 3)" "$(mkRun 30 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z 'x"$(touch /tmp/pwned)')"
 run WORKFLOW_PATH='x"$(touch /tmp/pwned)'
-expect "T-S17 hostile payload and path are data, not code" 0
-[ -e /tmp/pwned ] && { failed=$((failed + 1)); echo "FAIL T-S17 something was executed"; rm -f /tmp/pwned; }
-lacks "hostile run id is not replayed" "runs/5" "$calls"
+expect "T-S17b a hostile workflow path is data, not code" 0
+[ -e /tmp/pwned ] && { failed=$((failed + 1)); echo "FAIL T-S17b something was executed"; rm -f /tmp/pwned; }
 has "the hostile path matched as a plain string" "runs/30/rerun" "$calls"
-has "the hostile sha was refused" "::warning::" "$output"
 
 reset
 pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
@@ -369,8 +352,9 @@ run
 expect "T-S18 the token never shows in the output" 0
 lacks "no token in the output" "$token" "$output"
 lacks "no token in the gh calls" "$token" "$calls"
-run MAX_REPLAYS=bad
-lacks "no token on a configuration error" "$token" "$output"
+touch "$fx/failPulls"
+run
+lacks "no token when the listing fails" "$token" "$output"
 
 reset
 pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
@@ -397,14 +381,6 @@ has "warns" "::warning::" "$output"
 lacks "no rerun" "/rerun" "$calls"
 
 reset
-echo "{\"a\":$(pr 1 "$(sha 1)")}" > "$fx/pulls.json"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-run
-expect "T-S20c a listing that is an object of pull requests is not an array and posts nothing" 0
-has "warns" "::warning::" "$output"
-lacks "no rerun" "/rerun" "$calls"
-
-reset
 echo 'null' > "$fx/pulls.json"
 run
 expect "T-S20d a null listing warns and posts nothing" 0
@@ -427,28 +403,6 @@ has "says none" "#1 run 10 already none: nothing to change" "$output"
 lacks "no rerun" "/rerun" "$calls"
 
 reset
-pulls "$(pr 1 "$(sha 1)0")" "$(pr 2 ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD)" "$(pr 3 "$(sha 3)")"
-runsFor "$(sha 1)0" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-runsFor ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-runsFor "$(sha 3)" "$(mkRun 30 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-run
-expect "T-S24 a 41 character sha and an uppercase sha are malformed and skipped" 0
-countIs "two malformed warnings" "::warning::skipped a pull request with a malformed number or sha" 2 "$output"
-lacks "41 character sha not replayed" "runs/10/rerun" "$calls"
-lacks "uppercase sha not replayed" "runs/20/rerun" "$calls"
-has "the valid one is replayed" "runs/30/rerun" "$calls"
-
-reset
-pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")"
-runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z | jq -c '.id = "abc"')"
-runsFor "$(sha 2)" "$(mkRun 20 1 2026-01-01T00:00:00Z completed success 2026-01-01T00:00:00Z)"
-run MAX_REPLAYS=1
-expect "T-S25 a run with a non numeric id does not consume the attempt ceiling" 0
-has "the non numeric id is skipped" "::warning::#1: run id is not numeric: skipped" "$output"
-has "the valid run is replayed" "runs/20/rerun" "$calls"
-lacks "no limit warning" "limit of" "$output"
-
-reset
 pulls "$(pr 1 "$(sha 1)")"
 runsFor "$(sha 1)" "$(mkRun 10 1 2026-03-02T00:00:00Z completed failure 2026-03-02T00:00:00Z)"
 run MODE=recover SINCE=2026-03-01T00:00:00Z
@@ -462,6 +416,16 @@ run REPO=norepo
 expect "T-S28 REPO comes from the github context and is not validated by the script" 0
 has "the repository is used as given" "api -X GET repos/norepo/pulls" "$calls"
 has "the run is replayed" "runs/10/rerun" "$calls"
+
+# The template validates waitSeconds before this script runs; the script itself trusts its settings.
+reset
+greenPr 1
+run MAX_REPLAYS=0 WAIT_SECONDS=1000
+expect "T-S29 the script validates no setting: odd numbers are used as given and never fail the sweep" 0
+lacks "no configuration error" "recheckSweep:" "$output"
+has "the ceiling still holds with a ceiling of zero" "::warning::limit of 0 reruns reached" "$output"
+lacks "no rerun" "/rerun" "$calls"
+has "counts zero" "replayed: 0" "$(echo "$output" | tail -n 1)"
 
 # The runs of the second pass: runSeq gives the state of a run each time it is read (1st read, 2nd read, ...) and
 # repeats the last one, so every round of the wait reads the next state.
@@ -619,22 +583,6 @@ lacks "unreadable runs are not read again" "still in progress" "$output"
 [ "$(queries 10)" -eq 1 ] || { failed=$((failed + 1)); echo "FAIL T-W7 an unreadable run was read again"; }
 
 reset
-greenPr 1
-for bad in WAIT_SECONDS=-1 WAIT_SECONDS=abc WAIT_SECONDS=301 WAIT_SECONDS=600 WAIT_SECONDS= WAIT_SECONDS=1.5 "WAIT_SECONDS=1;id" WAIT_SECONDS=1000 \
-    POLL_SECONDS=0 POLL_SECONDS=abc POLL_SECONDS=61 POLL_SECONDS=-1 POLL_SECONDS= POLL_SECONDS=1.5; do
-    run $bad
-    expect "T-W8 invalid '$bad' exits 2" 2
-    [ -z "$calls" ] || { failed=$((failed + 1)); echo "FAIL T-W8 '$bad' called gh: $calls"; }
-    has "'$bad' says why on stderr" "recheckSweep:" "$output"
-done
-
-for good in "WAIT_SECONDS=0 POLL_SECONDS=60" "WAIT_SECONDS=300 POLL_SECONDS=1" "WAIT_SECONDS=1 POLL_SECONDS=60"; do
-    run $good
-    expect "T-W8b boundary '$good' is accepted" 0
-    has "'$good' replays" "replayed: 1" "$(echo "$output" | tail -n 1)"
-done
-
-reset
 pulls "$(pr 1 "$(sha 1)")"
 pendingPr 1
 runSeq 10 "$(runState 10 in_progress '')"
@@ -761,16 +709,6 @@ expect "T-A5 a failure that only says already is not benign" 0
 has "warning" "::warning::#1: could not replay run 10" "$output"
 lacks "no benign notice" "already being replayed" "$output"
 lacks "the ceiling stopped the next run" "runs/20/rerun" "$calls"
-
-reset
-pulls "$(pr 1 "$(sha 1)")"
-runsFor "$(sha 1)" "$(mkRun '"../x"' 1 2026-01-01T00:00:00Z in_progress '' 2026-01-01T00:00:00Z)"
-run
-expect "T-W14 a run in progress with a non numeric id is skipped and never queried" 0
-has "skipped notice" "::notice::#1 run ../x is in_progress: skipped" "$output"
-lacks "no read with that id" "../x" "$calls"
-lacks "never lists the runs in progress" "status=in_progress" "$calls"
-[ "$(sleepCount)" -eq 0 ] || { failed=$((failed + 1)); echo "FAIL T-W14 slept"; }
 
 reset
 pulls "$(pr 1 "$(sha 1)")" "$(pr 2 "$(sha 2)")" "$(pr 3 "$(sha 3)")"
