@@ -169,7 +169,7 @@ countIs() {
 reset
 greenPr 1
 run
-expect "T-S1 a green check is replayed in base-moved mode" 0
+expect "T-S1 a green check is replayed" 0
 has "posts the rerun on the right run" "api -X POST repos/o/r/actions/runs/10/rerun --silent" "$calls"
 countIs "exactly one rerun" "/rerun" 1 "$calls"
 has "reports the replay" "#1: replayed run 10" "$output"
@@ -180,7 +180,7 @@ reset
 pulls "$(pr 1 "$(sha 1)")"
 runsFor "$(sha 1)" "$(mkRun 10 1 2026-01-01T00:00:00Z completed failure 2026-01-01T00:00:00Z)"
 run
-expect "T-S2 a failed check is not replayed in base-moved mode" 0
+expect "T-S2 a failed check is not replayed" 0
 lacks "no rerun" "/rerun" "$calls"
 has "says nothing to change" "#1 run 10 already failure: nothing to change" "$output"
 has "counts zero" "replayed: 0" "$output"

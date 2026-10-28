@@ -13,7 +13,7 @@ on:
         type: string
         default: .github/workflows/enforceRebase.yml
       waitSeconds:
-        description: Seconds to wait for the runs in progress before giving up, from 0 to 300
+        description: Seconds to wait for the runs in progress before giving up, from 0 to 300; the runs are read every 10 seconds, so a value below 10 waits for nothing
         type: string
         default: "120"
 
