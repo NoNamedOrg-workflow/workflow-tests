@@ -33,13 +33,12 @@ latestRuns() {
 # A run in progress may have read the base before the push that started this sweep, so it is awaited, not skipped.
 # A queued run reads the live base when it starts, after that push, so it never goes stale.
 shouldWait() {
-    local id=$1 status=$2
-    [ "$status" = in_progress ] && [ "$waitSeconds" -gt 0 ]
+    [ "$1" = in_progress ] && [ "$waitSeconds" -gt 0 ]
 }
 
 shouldReplay() {
     local number=$1 id=$2 status=$3 conclusion=$4
-    if shouldWait "$id" "$status"; then
+    if shouldWait "$status"; then
         echo "::notice::#$number run $id is in progress: waiting for it to finish"
         pending="$pending$number $id"$'\n'
         return 1
