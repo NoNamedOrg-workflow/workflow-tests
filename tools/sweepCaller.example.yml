@@ -6,12 +6,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      mode:
-        description: base-moved replays the green checks; recover replays the failed ones of the last 24 hours
-        type: choice
-        options: [base-moved, recover]
-        default: base-moved
 
 permissions: {}
 
@@ -24,5 +18,3 @@ jobs:
     # The file generated in dist/ must be published at this path of the central repository. The @development ref follows
     # the central branch on purpose (team decision, same as git-tree), so a fix there reaches every caller.
     uses: OWNER/CENTRAL-REPO/.github/workflows/reusable-rebase-sweep.yml@development
-    with:
-      mode: ${{ inputs.mode || 'base-moved' }}

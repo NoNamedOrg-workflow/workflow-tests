@@ -8,20 +8,12 @@ run-name: "CI: Re-check open pull requests"
 on:
   workflow_call:
     inputs:
-      mode:
-        description: base-moved replays the green checks of the open pull requests; recover replays the failed ones of a time window
-        type: string
-        default: base-moved
-      windowHours:
-        description: Size of the time window, in hours, that recover mode looks back
-        type: string
-        default: "24"
       workflowPath:
         description: Path of the rebase check workflow whose latest run is replayed
         type: string
         default: .github/workflows/enforceRebase.yml
       waitSeconds:
-        description: Seconds that base-moved mode waits for the runs in progress before giving up, from 0 to 300
+        description: Seconds to wait for the runs in progress before giving up, from 0 to 300
         type: string
         default: "120"
 
@@ -41,8 +33,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       REPO: ${{ github.repository }}
       BASE: ${{ github.ref_name }}
-      MODE: ${{ inputs.mode }}
-      WINDOW_HOURS: ${{ inputs.windowHours }}
       WORKFLOW_PATH: ${{ inputs.workflowPath }}
       WAIT_SECONDS: ${{ inputs.waitSeconds }}
     steps:
@@ -55,10 +45,4 @@ __RECHECK_SWEEP_SCRIPT__
           chmod +x "$RUNNER_TEMP/recheckSweep.sh"
           [[ "$WAIT_SECONDS" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$WAIT_SECONDS" -le 300 ] \
               || { echo "::error::waitSeconds must be an integer from 0 to 300"; exit 2; }
-          if [ "$MODE" = recover ]; then
-              [[ "$WINDOW_HOURS" =~ ^[1-9][0-9]{0,3}$ ]] || { echo "::error::windowHours must be an integer from 1 to 9999"; exit 2; }
-              SINCE=$(date -u -d "-${WINDOW_HOURS} hours" +%Y-%m-%dT%H:%M:%SZ) \
-                  || { echo "::error::could not compute the start of the window"; exit 2; }
-              export SINCE
-          fi
           "$RUNNER_TEMP/recheckSweep.sh"

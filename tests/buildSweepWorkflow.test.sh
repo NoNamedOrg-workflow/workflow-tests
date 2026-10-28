@@ -357,10 +357,11 @@ behaviorMutant() {
     check "T-RF21-b/mutant-$name the behavior cases fail when the template is altered this way" test -s "$work/$name.problems"
 }
 
-behaviorMutant noWaitValidation '/waitSeconds must be/ { next } { print }'
+# The error line stays and only its exit is neutralized, so the step still runs and only the validation is lost.
+behaviorMutant noWaitValidation '/waitSeconds must be/ { sub(/exit 2/, "true") } { print }'
 behaviorMutant waitUnbounded '{ sub(/-le 300/, "-le 3000") } { print }'
 behaviorMutant waitFailureExitsOne '/waitSeconds must be/ { sub(/exit 2/, "exit 1") } { print }'
-behaviorMutant waitRegexLoose '/waitSeconds must be/ { next } { sub(/\^\(0\|\[1-9\]\[0-9\]\{0,2\}\)\$/, ".*") } { print }'
+behaviorMutant waitRegexLoose '{ sub(/\^\(0\|\[1-9\]\[0-9\]\{0,2\}\)\$/, ".*") } { print }'
 behaviorMutant sinceDefined '{ print } index($0, "chmod +x") { print "          export SINCE=2026-01-01T00:00:00Z" }'
 behaviorMutant dateCalled '{ print } index($0, "chmod +x") { print "          date -u > /dev/null" }'
 
